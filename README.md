@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/nxeratech/marouba/actions/workflows/ci.yml/badge.svg)](https://github.com/nxeratech/marouba/actions/workflows/ci.yml)
 
+[marouba.app](https://marouba.app)
+
 Teach your computer how work gets done. Once.
 
 Marouba is an open source memory and replay engine for desktop workflows. It records how a task is completed, stores the knowledge in a human-readable vault, and replays the cheapest reliable route automatically.
