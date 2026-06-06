@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Marouba - Your computer should remember what you taught it</title>
+    <title>Marouba - Your computer should know how you work</title>
     <meta
       name="description"
       content="Marouba is an open source memory and replay engine for desktop workflows."
@@ -19,7 +19,6 @@
         --green: #49d18b;
         --cyan: #60c7ff;
         --amber: #f4bf64;
-        --danger: #ff7272;
         color-scheme: dark;
         font-family:
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -74,7 +73,6 @@
         display: flex;
         font-weight: 700;
         gap: 10px;
-        letter-spacing: 0;
       }
 
       .mark {
@@ -142,15 +140,23 @@
         max-width: 920px;
       }
 
+      .subhead {
+        color: #d9e2ea;
+        font-size: 24px;
+        line-height: 1.35;
+        margin: 24px 0 0;
+      }
+
       .lead {
         color: #c7d0da;
         font-size: 20px;
         line-height: 1.6;
-        margin: 28px 0 0;
+        margin: 18px 0 0;
         max-width: 680px;
       }
 
-      .hero-actions {
+      .hero-actions,
+      .cta-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
@@ -209,7 +215,7 @@
 
       .section-head {
         margin-bottom: 34px;
-        max-width: 760px;
+        max-width: 820px;
       }
 
       h2 {
@@ -222,13 +228,15 @@
       .section-head p,
       .card p,
       .vault-copy p,
-      .market p {
+      .market p,
+      .footer-cta p {
         color: var(--muted);
         font-size: 16px;
         line-height: 1.65;
       }
 
-      .problem {
+      .problem,
+      .demo {
         background: #0b0f14;
         border-block: 1px solid rgba(255, 255, 255, 0.06);
       }
@@ -267,17 +275,6 @@
         border-top-color: var(--amber);
       }
 
-      .vault {
-        display: grid;
-        gap: 36px;
-        grid-template-columns: 0.88fr 1.12fr;
-      }
-
-      .demo {
-        background: #0b0f14;
-        border-top: 1px solid rgba(255, 255, 255, 0.06);
-      }
-
       .status-section {
         background: #08090b;
         border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -302,39 +299,10 @@
         padding-left: 20px;
       }
 
-      .demo-flow {
+      .vault {
         display: grid;
-        gap: 14px;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-
-      .demo-step {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        min-height: 190px;
-        padding: 20px;
-      }
-
-      .demo-step span {
-        color: var(--cyan);
-        display: block;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 12px;
-        margin-bottom: 14px;
-      }
-
-      .demo-step strong {
-        display: block;
-        font-size: 17px;
-        margin-bottom: 10px;
-      }
-
-      .demo-step p {
-        color: var(--muted);
-        font-size: 15px;
-        line-height: 1.6;
-        margin: 0;
+        gap: 36px;
+        grid-template-columns: 0.88fr 1.12fr;
       }
 
       .vault-code {
@@ -350,92 +318,20 @@
       }
 
       .market-inner {
-        align-items: center;
-        display: grid;
-        gap: 32px;
-        grid-template-columns: 1fr 0.75fr;
+        max-width: 860px;
       }
 
-      .split {
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        display: grid;
-        grid-template-columns: 7fr 3fr;
-        min-height: 160px;
-        overflow: hidden;
-      }
-
-      .split div {
-        align-content: center;
-        display: grid;
-        padding: 22px;
-      }
-
-      .split strong {
-        font-size: 42px;
-      }
-
-      .creator {
-        background: rgba(73, 209, 139, 0.12);
-      }
-
-      .platform {
-        background: rgba(96, 199, 255, 0.12);
-        border-left: 1px solid var(--line);
-      }
-
-      .waitlist {
-        padding-bottom: 110px;
-      }
-
-      form {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        display: grid;
-        gap: 16px;
-        max-width: 720px;
-        padding: 22px;
-      }
-
-      .form-row {
-        display: grid;
-        gap: 14px;
-        grid-template-columns: 1fr 1fr;
-      }
-
-      label {
-        color: #d7dee7;
-        display: grid;
-        font-size: 14px;
-        font-weight: 700;
-        gap: 8px;
-      }
-
-      input,
-      select {
-        background: #0b0f14;
-        border: 1px solid #2f3b48;
-        border-radius: 6px;
-        color: var(--text);
-        font: inherit;
-        min-height: 44px;
-        padding: 0 12px;
-        width: 100%;
-      }
-
-      .status {
+      .status-note {
+        border-left: 3px solid var(--green);
         color: var(--muted);
         font-size: 14px;
-        min-height: 20px;
+        line-height: 1.6;
+        margin-top: 24px;
+        padding-left: 14px;
       }
 
-      .status.ok {
-        color: var(--green);
-      }
-
-      .status.err {
-        color: var(--danger);
+      .footer-cta {
+        padding-bottom: 110px;
       }
 
       footer {
@@ -457,10 +353,7 @@
         .problem-grid,
         .solution-grid,
         .status-grid,
-        .demo-flow,
-        .vault,
-        .market-inner,
-        .form-row {
+        .vault {
           grid-template-columns: 1fr;
         }
 
@@ -483,7 +376,8 @@
             <a href="#solution">Solution</a>
             <a href="#demo">Demo</a>
             <a href="#vault">Vault</a>
-            <a href="#waitlist">Waitlist</a>
+            <a href="#marketplace">Marketplace</a>
+            <a href="https://github.com/nxeratech/marouba">GitHub</a>
           </div>
         </nav>
       </div>
@@ -493,19 +387,20 @@
       <section class="hero">
         <div class="shell hero-grid">
           <div>
-            <p class="eyebrow">Open source workflow memory engine</p>
-            <h1>Your computer should remember what you taught it.</h1>
+            <p class="eyebrow">Any app. Any workflow. Any agent.</p>
+            <h1>Your computer should know how you work.</h1>
+            <p class="subhead">Not how everyone works. How you work.</p>
             <p class="lead">
-              Marouba learns your workflows once, replays them forever, and asks you to correct it
-              once, records the fix, and never asks again when things change.
+              Teach it once. It remembers every decision, every route, every fix - forever.
+              Open source. Yours to keep.
             </p>
             <div class="hero-actions">
-              <a class="button" href="#waitlist">Join the waitlist</a>
-              <a class="button secondary" href="https://github.com/nxeratech/marouba">Star on GitHub</a>
+              <a class="button" href="https://github.com/nxeratech/marouba">Star on GitHub &rarr;</a>
+              <a class="button secondary" href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault spec &rarr;</a>
             </div>
           </div>
 
-          <div class="terminal" aria-label="Marouba terminal preview">
+          <div id="demo" class="terminal" aria-label="Marouba terminal preview">
             <div class="terminal-bar">
               <span class="dot red"></span>
               <span class="dot yellow"></span>
@@ -528,26 +423,35 @@ status: portable, inspectable, yours</pre>
         <div class="shell">
           <div class="section-head">
             <p class="eyebrow">The problem</p>
-            <h2>The frontier labs are building smarter agents. None of them are building ones that remember.</h2>
+            <h2>The frontier labs are building smarter models. Nobody is building memory with real human taste.</h2>
             <p>
-              Every AI agent today starts from zero. Every session. Every time. You teach your
-              computer to export a report, process an image, or run a production task. Tomorrow it
-              forgets. The industry's answer is bigger models and longer context windows. But the
-              problem is not intelligence. It is memory.
+              AI tools that look at your screen are slow, expensive, and learn nothing. Every session
+              starts from zero. Every workflow re-explained. Every fix forgotten. The industry's
+              answer is bigger models and longer context windows. But the problem is not intelligence.
+              It is memory.
             </p>
           </div>
           <div class="problem-grid">
             <article class="card">
               <strong>Every workflow is re-taught</strong>
-              <p>The average knowledge worker repeats the same digital workflows dozens of times per month.</p>
+              <p>
+                The average knowledge worker repeats the same digital workflows dozens of times a
+                month. AI agents start from scratch every single time.
+              </p>
             </article>
             <article class="card">
-              <strong>Every update breaks brittle automation</strong>
-              <p>A button moves, a dialog changes, and pixel-click loops are completely lost.</p>
+              <strong>Every update breaks automation</strong>
+              <p>
+                A button moves, a dialog changes, a version updates. Every fragile pixel-click loop
+                breaks completely and silently.
+              </p>
             </article>
             <article class="card">
               <strong>Every fix disappears</strong>
-              <p>When a route breaks, the correction vanishes into the session instead of becoming shared knowledge.</p>
+              <p>
+                When something breaks and you fix it manually, that fix vanishes. It never becomes
+                shared knowledge. You do it again next time.
+              </p>
             </article>
           </div>
         </div>
@@ -557,20 +461,37 @@ status: portable, inspectable, yours</pre>
         <div class="shell">
           <div class="section-head">
             <p class="eyebrow">The solution</p>
-            <h2>Marouba: teach once. Replay forever. Correct once.</h2>
+            <h2>Teach once. Replay forever. Correct once.</h2>
+            <p>
+              Marouba works with any app on Windows or Mac. Photoshop. Ableton. AutoCAD. Excel.
+              Blender. Your terminal. Your browser. Anything you can do, Marouba can remember. It
+              does not guess. It does not look at your screen and hope. It knows - because you
+              showed it once.
+            </p>
           </div>
           <div class="solution-grid">
             <article class="card mode">
               <strong>Teach</strong>
-              <p>Perform your workflow normally. Marouba observes the context, the route, and the intent behind what you did.</p>
+              <p>
+                Perform your workflow normally. Marouba observes the context, the route, and the
+                intent behind what you did. Stored as human-readable Markdown in a vault that belongs
+                to you.
+              </p>
             </article>
             <article class="card mode">
               <strong>Replay</strong>
-              <p>Need the same workflow again? Marouba tries every known route in order — if one breaks, it falls back to the next.</p>
+              <p>
+                Need the same workflow again? Marouba tries every known route in order - cheapest
+                first. API, scripting, UI elements, keyboard shortcuts. If one breaks, it falls back
+                to the next.
+              </p>
             </article>
             <article class="card mode">
               <strong>Repair</strong>
-              <p>When something moves or breaks, Marouba asks you to correct it once, records the fix, and never asks again.</p>
+              <p>
+                When something moves or breaks, Marouba asks you to correct it once, records the fix,
+                and never asks again. The vault updates. The next run just works.
+              </p>
             </article>
           </div>
         </div>
@@ -607,50 +528,8 @@ status: portable, inspectable, yours</pre>
               <h3>Source of truth</h3>
               <ul>
                 <li><a href="https://github.com/nxeratech/marouba">GitHub repository</a></li>
-                <li><a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec →</a></li>
+                <li><a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec &rarr;</a></li>
               </ul>
-            </article>
-          </div>
-        </div>
-      </section>
-
-      <section id="demo" class="demo">
-        <div class="shell">
-          <div class="section-head">
-            <p class="eyebrow">See how it works</p>
-            <h2>A 60-second demo flow.</h2>
-            <p>This is the placeholder for the launch video: a real desktop workflow taught once, replayed the next day, then corrected once after an app update.</p>
-          </div>
-          <div class="demo-flow">
-            <article class="demo-step">
-              <span>00:00</span>
-              <strong>This is my computer.</strong>
-              <p>A quiet desktop. The same repetitive workflow is about to start.</p>
-            </article>
-            <article class="demo-step">
-              <span>00:08</span>
-              <strong>Today I am teaching it once.</strong>
-              <p>Open Photoshop, apply the same filters, export, save. Marouba stores every route — element names, shortcuts, commands — as human-readable Markdown.</p>
-            </article>
-            <article class="demo-step">
-              <span>00:15</span>
-              <strong>Tomorrow, I hit replay.</strong>
-              <p>The workflow runs from the vault. No re-teaching. It just knows.</p>
-            </article>
-            <article class="demo-step">
-              <span>00:21</span>
-              <strong>Then the app changes.</strong>
-              <p>Photoshop updates. A button moves. This is where every other automation breaks.</p>
-            </article>
-            <article class="demo-step">
-              <span>00:28</span>
-              <strong>Marouba records the correction.</strong>
-              <p>It asks you to correct it once, records the fix, and never asks again.</p>
-            </article>
-            <article class="demo-step">
-              <span>00:49</span>
-              <strong>Teach once. Replay forever. Correct once.</strong>
-              <p>The same loop works across Photoshop, Excel, Ableton, Chrome, and any desktop app with a profile.</p>
             </article>
           </div>
         </div>
@@ -663,12 +542,18 @@ status: portable, inspectable, yours</pre>
             <h2>Not a macro. Not a script. A living record of how you work.</h2>
             <p>
               Traditional automations store actions: click here, type this, press Enter. Marouba
-              vaults store every route — element names, shortcuts, commands — as human-readable
-              Markdown, plus fallback paths, verification rules, and repair history. They are
-              git-friendly, portable, inspectable, and yours.
+              vaults store every route - element names, shortcuts, commands - as human-readable
+              Markdown, plus fallback paths, verification rules, and repair history.
             </p>
+            <p>Human readable. Editable directly. Portable. Yours.</p>
+            <p>Git-friendly. Obsidian-compatible.</p>
             <p>
-              <a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec →</a>
+              Shareable with any agent in your stack - Barry, Claude, n8n, anything with an HTTP
+              call.
+            </p>
+            <p>A value system built into the architecture.</p>
+            <p>
+              <a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec &rarr;</a>
             </p>
           </div>
           <div class="vault-code">
@@ -691,64 +576,45 @@ verification:
         </div>
       </section>
 
-      <section class="market">
+      <section id="marketplace" class="market">
         <div class="shell market-inner">
-          <div>
-            <p class="eyebrow">Marketplace roadmap</p>
-            <h2>Coming: The Marketplace.</h2>
-            <p>
-              Your workflows have value. The roadmap is a signed workflow marketplace where creators
-              package vaults for real apps, buyers install them, and Marouba tries every known route
-              in order — if one breaks, it falls back to the next. Revenue split: 70% creator, 30%
-              platform.
-            </p>
-          </div>
-          <div class="split" aria-label="Marketplace revenue split">
-            <div class="creator">
-              <span>Creator</span>
-              <strong>70%</strong>
-            </div>
-            <div class="platform">
-              <span>Platform</span>
-              <strong>30%</strong>
-            </div>
-          </div>
+          <p class="eyebrow">Marketplace</p>
+          <h2>Your taste has value.</h2>
+          <p>
+            The way you work - your process, your decisions, your creative instincts - is worth
+            something to someone who wants to do it the same way.
+          </p>
+          <p>
+            Sample pack creators. Photoshop artists. AutoCAD architects. Excel power users. Ableton
+            producers. Whatever you make, however you make it - there is an audience that wants to
+            learn from you, not just watch you.
+          </p>
+          <p>Record your process. Publish it to the marketplace. Set your own price. Get paid directly.</p>
+          <p>
+            For too long, platforms have mined human creativity without consent or compensation.
+            Factories are fitting workers with cameras to record their movements for robots -
+            without asking. Frontier labs train on creative work - without paying.
+          </p>
+          <p>Marouba is the alternative. Your knowledge. Your price. Your vault.</p>
+          <p class="status-note">
+            Marketplace coming after open source launch. Early contributors get founder status.
+          </p>
         </div>
       </section>
 
-      <section id="waitlist" class="waitlist">
+      <section class="footer-cta">
         <div class="shell">
           <div class="section-head">
-            <p class="eyebrow">Waitlist</p>
-            <h2>Stop teaching your computer the same thing twice.</h2>
-            <p>Early members get first access to the beta, input on the vault format, founder status in the marketplace, and a direct line to the core team.</p>
-          </div>
-          <form id="waitlist-form" action="https://webhook.nxeratech.ie/marouba-waitlist" method="post">
-            <div class="form-row">
-              <label>
-                Name
-                <input name="name" type="text" autocomplete="name" required />
-              </label>
-              <label>
-                Email
-                <input name="email" type="email" autocomplete="email" required />
-              </label>
+            <h2>Open source. Free forever. Yours to keep.</h2>
+            <p>
+              The engine is open. The vault is yours. No subscriptions, no lock-in, no platform that
+              disappears and takes your workflows with it.
+            </p>
+            <div class="cta-actions">
+              <a class="button" href="https://github.com/nxeratech/marouba">Star on GitHub &rarr;</a>
+              <a class="button secondary" href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault spec &rarr;</a>
             </div>
-            <label>
-              What app do you use most?
-              <select name="primary_app" required>
-                <option value="">Choose an app</option>
-                <option>Photoshop</option>
-                <option>ComfyUI</option>
-                <option>Ableton</option>
-                <option>Blender</option>
-                <option>Other</option>
-              </select>
-            </label>
-            <input type="hidden" name="source" value="marouba.app" />
-            <button class="button" type="submit">Join the waitlist - it's free</button>
-            <div id="form-status" class="status" role="status" aria-live="polite"></div>
-          </form>
+          </div>
         </div>
       </section>
     </main>
@@ -756,37 +622,5 @@ verification:
     <footer>
       <div class="shell">Marouba by NXeraTech. Teach once. Replay forever. Correct once.</div>
     </footer>
-
-    <script>
-      const form = document.querySelector("#waitlist-form");
-      const status = document.querySelector("#form-status");
-
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        status.className = "status";
-        status.textContent = "Submitting...";
-
-        const body = Object.fromEntries(new FormData(form).entries());
-
-        try {
-          const response = await fetch(form.action, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-
-          if (!response.ok) {
-            throw new Error(`Request failed: ${response.status}`);
-          }
-
-          form.reset();
-          status.className = "status ok";
-          status.textContent = "You're on the list. We'll be in touch.";
-        } catch (error) {
-          status.className = "status err";
-          status.textContent = "Could not submit just now. Please try again in a moment.";
-        }
-      });
-    </script>
   </body>
 </html>
