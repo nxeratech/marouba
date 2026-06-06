@@ -1,27 +1,55 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Marouba - Your computer should know how you work</title>
+    <title>Marouba — Your computer should know how you work</title>
     <meta
       name="description"
-      content="Marouba is an open source memory and replay engine for desktop workflows."
+      content="Marouba is an open source workflow memory engine. Teach it once. It remembers every decision, every route, every fix — forever."
     />
+    <meta name="theme-color" content="#15120D" />
+
+    <!-- Single Google Font (editorial display serif). Page degrades gracefully to a
+         system serif if Google Fonts is unreachable — no hard CDN dependency. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Mark the document as JS-capable before paint so reveal styles never trap
+         content for no-JS visitors. -->
+    <script>
+      document.documentElement.classList.remove("no-js");
+      document.documentElement.classList.add("js");
+    </script>
+
     <style>
       :root {
-        --bg: #08090b;
-        --panel: #11151b;
-        --panel-2: #171d25;
-        --text: #eef2f6;
-        --muted: #9aa6b2;
-        --line: #26313d;
-        --green: #49d18b;
-        --cyan: #60c7ff;
-        --amber: #f4bf64;
+        /* A warm espresso near-black — ink-on-paper, not the usual cold #0d0d0d. */
+        --bg: #15120d;
+        --bg-2: #1c1813;
+        --bg-code: #211c15;
+        --line: #322a20;
+        --line-strong: #463a2b;
+        --text: #f4efe6; /* warm paper white */
+        --muted: #aba08d; /* warm grey */
+        --muted-2: #7e7565;
+        /* One considered accent: a burnt marigold. Unexpected for a dev tool,
+           warm enough to carry the "your work, your taste" values angle. */
+        --accent: #e9a13c;
+        --accent-press: #cd8526;
+        --maxw: 1140px;
+
+        --serif: "Fraunces", Georgia, "Times New Roman", serif;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+          Arial, sans-serif;
+        --mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", Consolas,
+          "Liberation Mono", monospace;
+
         color-scheme: dark;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
       * {
@@ -33,11 +61,14 @@
       }
 
       body {
-        background:
-          radial-gradient(circle at 50% -10%, rgba(73, 209, 139, 0.14), transparent 34rem),
-          linear-gradient(180deg, #08090b 0%, #0b0e12 52%, #08090b 100%);
-        color: var(--text);
         margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 17px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
 
       a {
@@ -46,581 +77,962 @@
       }
 
       .shell {
+        width: 100%;
+        max-width: var(--maxw);
         margin: 0 auto;
-        max-width: 1120px;
-        padding: 0 24px;
+        padding: 0 28px;
       }
 
+      /* Typographic system — the words are the hero. */
+      h1,
+      h2,
+      h3 {
+        font-family: var(--serif);
+        font-weight: 500;
+        letter-spacing: -0.012em;
+        margin: 0;
+      }
+
+      .eyebrow {
+        font-family: var(--sans);
+        font-size: 12.5px;
+        font-weight: 600;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin: 0;
+      }
+
+      .lead,
+      .body {
+        color: var(--muted);
+      }
+
+      em {
+        font-style: italic;
+      }
+
+      /* ---------- Header ---------- */
       header {
-        backdrop-filter: blur(18px);
-        background: rgba(8, 9, 11, 0.78);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
         position: sticky;
         top: 0;
-        z-index: 10;
+        z-index: 20;
+        background: color-mix(in srgb, var(--bg) 82%, transparent);
+        backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--line);
       }
 
       nav {
-        align-items: center;
         display: flex;
-        gap: 24px;
+        align-items: center;
         justify-content: space-between;
+        gap: 24px;
         min-height: 68px;
       }
 
       .brand {
+        display: inline-flex;
         align-items: center;
-        display: flex;
-        font-weight: 700;
-        gap: 10px;
+        gap: 11px;
+        font-family: var(--serif);
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
       }
 
-      .mark {
-        background: linear-gradient(135deg, var(--green), var(--cyan));
-        border-radius: 4px;
-        height: 18px;
-        width: 18px;
+      .brand svg {
+        display: block;
+        height: 32px;
+        width: 32px;
+        flex: none;
       }
 
       .nav-links {
-        align-items: center;
-        color: var(--muted);
         display: flex;
-        font-size: 14px;
-        gap: 18px;
-      }
-
-      .button {
         align-items: center;
-        background: var(--text);
-        border: 0;
-        border-radius: 6px;
-        color: #07090b;
-        cursor: pointer;
-        display: inline-flex;
-        font: inherit;
-        font-weight: 700;
-        justify-content: center;
-        min-height: 44px;
-        padding: 0 18px;
+        gap: 30px;
+        font-size: 15px;
+        color: var(--muted);
       }
 
-      .button.secondary {
-        background: transparent;
-        border: 1px solid var(--line);
+      .nav-links a {
+        position: relative;
+        padding: 4px 0;
+        transition: color 0.18s ease;
+      }
+
+      .nav-links a::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        bottom: -2px;
+        height: 1.5px;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.22s ease;
+      }
+
+      .nav-links a:hover {
         color: var(--text);
       }
 
-      .hero {
-        min-height: calc(100vh - 68px);
-        padding: 96px 0 48px;
+      .nav-links a:hover::after {
+        width: 100%;
       }
 
-      .hero-grid {
+      /* ---------- Buttons ---------- */
+      .btn {
+        display: inline-flex;
         align-items: center;
-        display: grid;
-        gap: 44px;
-        grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+        gap: 9px;
+        min-height: 48px;
+        padding: 0 22px;
+        border-radius: 7px;
+        font: inherit;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition:
+          transform 0.16s ease,
+          background 0.18s ease,
+          border-color 0.18s ease,
+          color 0.18s ease;
       }
 
-      .eyebrow {
-        color: var(--green);
-        font-size: 13px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        margin: 0 0 18px;
-        text-transform: uppercase;
+      .btn .arw {
+        font-family: var(--sans);
+        transition: transform 0.18s ease;
       }
 
-      h1 {
-        font-size: clamp(42px, 7vw, 82px);
-        letter-spacing: 0;
-        line-height: 0.95;
-        margin: 0;
-        max-width: 920px;
+      .btn:hover .arw {
+        transform: translateX(3px);
       }
 
-      .subhead {
-        color: #d9e2ea;
-        font-size: 24px;
-        line-height: 1.35;
-        margin: 24px 0 0;
+      .btn-primary {
+        background: var(--accent);
+        color: #1a1409;
       }
 
-      .lead {
-        color: #c7d0da;
-        font-size: 20px;
-        line-height: 1.6;
-        margin: 18px 0 0;
-        max-width: 680px;
+      .btn-primary:hover {
+        background: var(--accent-press);
       }
 
-      .hero-actions,
-      .cta-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 32px;
+      .btn-ghost {
+        background: transparent;
+        color: var(--text);
+        border-color: var(--line-strong);
       }
 
-      .terminal {
-        background: rgba(17, 21, 27, 0.88);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
-        overflow: hidden;
+      .btn-ghost:hover {
+        border-color: var(--accent);
+        color: var(--accent);
       }
 
-      .terminal-bar {
+      .btn-sm {
+        min-height: 40px;
+        padding: 0 16px;
+        font-size: 14px;
+      }
+
+      /* Inline text link with arrow */
+      .link {
+        display: inline-flex;
         align-items: center;
-        background: #0d1117;
-        border-bottom: 1px solid var(--line);
-        display: flex;
         gap: 8px;
-        height: 38px;
-        padding: 0 14px;
+        color: var(--accent);
+        font-weight: 600;
+        border-bottom: 1px solid transparent;
+        transition: border-color 0.18s ease;
       }
 
-      .dot {
-        border-radius: 999px;
-        height: 10px;
-        width: 10px;
+      .link .arw {
+        transition: transform 0.18s ease;
       }
 
-      .dot.red {
-        background: #ff665c;
+      .link:hover {
+        border-color: var(--accent);
       }
 
-      .dot.yellow {
-        background: #f5c04f;
+      .link:hover .arw {
+        transform: translateX(3px);
       }
 
-      .dot.green {
-        background: #48c979;
-      }
-
-      pre {
-        color: #d6e2ed;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 13px;
-        line-height: 1.65;
-        margin: 0;
-        overflow-x: auto;
-        padding: 22px;
-      }
-
+      /* ---------- Sections ---------- */
       section {
-        padding: 84px 0;
+        padding: 132px 0;
+        scroll-margin-top: 84px;
       }
 
       .section-head {
-        margin-bottom: 34px;
-        max-width: 820px;
+        max-width: 780px;
+      }
+
+      .section-head .eyebrow {
+        margin-bottom: 22px;
       }
 
       h2 {
-        font-size: clamp(30px, 4vw, 48px);
-        letter-spacing: 0;
-        line-height: 1.05;
+        font-size: clamp(31px, 4.4vw, 50px);
+        line-height: 1.06;
+      }
+
+      .section-head .body {
+        font-size: 18px;
+        margin: 26px 0 0;
+        max-width: 680px;
+      }
+
+      .rule {
+        height: 1px;
+        background: var(--line);
+        border: 0;
         margin: 0;
       }
 
-      .section-head p,
-      .card p,
-      .vault-copy p,
-      .market p,
-      .footer-cta p {
-        color: var(--muted);
-        font-size: 16px;
-        line-height: 1.65;
+      /* ---------- Hero ---------- */
+      .hero {
+        padding: clamp(90px, 13vw, 168px) 0 clamp(72px, 9vw, 120px);
       }
 
-      .problem,
-      .demo {
-        background: #0b0f14;
-        border-block: 1px solid rgba(255, 255, 255, 0.06);
+      .hero .eyebrow {
+        margin-bottom: 30px;
       }
 
-      .problem-grid,
-      .solution-grid,
-      .status-grid {
+      .hero h1 {
+        font-size: clamp(46px, 8.2vw, 104px);
+        line-height: 0.98;
+        font-weight: 500;
+        max-width: 16ch;
+      }
+
+      .hero .subhead {
+        font-family: var(--serif);
+        font-style: italic;
+        font-weight: 400;
+        font-size: clamp(22px, 3vw, 32px);
+        color: var(--text);
+        margin: 24px 0 0;
+        max-width: 24ch;
+      }
+
+      .hero .body {
+        font-size: 19px;
+        line-height: 1.7;
+        margin: 30px 0 0;
+        max-width: 56ch;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin-top: 42px;
+      }
+
+      /* ---------- Card grids ---------- */
+      .cards {
         display: grid;
-        gap: 16px;
         grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 54px;
       }
 
       .card {
-        background: var(--panel);
+        background: var(--bg-2);
         border: 1px solid var(--line);
-        border-radius: 8px;
-        min-height: 190px;
-        padding: 22px;
+        border-radius: 10px;
+        padding: 30px 28px 32px;
+        min-height: 216px;
       }
 
-      .card strong {
-        display: block;
-        font-size: 18px;
-        margin-bottom: 10px;
+      .card .idx {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--accent);
+        letter-spacing: 0.04em;
       }
 
-      .mode {
-        border-top: 3px solid var(--green);
+      .card h3 {
+        font-size: 23px;
+        margin: 18px 0 12px;
+        letter-spacing: -0.01em;
       }
 
-      .mode:nth-child(2) {
-        border-top-color: var(--cyan);
-      }
-
-      .mode:nth-child(3) {
-        border-top-color: var(--amber);
-      }
-
-      .status-section {
-        background: #08090b;
-        border-top: 1px solid rgba(255, 255, 255, 0.06);
-      }
-
-      .status-card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 22px;
-      }
-
-      .status-card h3 {
-        font-size: 22px;
-        margin: 0 0 16px;
-      }
-
-      .status-card ul {
-        color: var(--muted);
-        line-height: 1.8;
+      .card p {
         margin: 0;
-        padding-left: 20px;
+        color: var(--muted);
+        font-size: 15.5px;
+        line-height: 1.62;
       }
 
-      .vault {
+      /* Solution cards get a top accent tick to read as a sequence */
+      .cards.steps .card {
+        border-top: 2px solid var(--accent);
+      }
+
+      /* ---------- Vault ---------- */
+      .vault-grid {
         display: grid;
-        gap: 36px;
-        grid-template-columns: 0.88fr 1.12fr;
+        grid-template-columns: 0.92fr 1.08fr;
+        gap: 56px;
+        align-items: start;
       }
 
-      .vault-code {
-        background: #0d1117;
-        border: 1px solid var(--line);
-        border-radius: 8px;
+      .vault-affirm {
+        margin: 30px 0 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 6px;
+        color: var(--text);
+        font-size: 16px;
+        line-height: 1.7;
+      }
+
+      .vault-affirm li {
+        color: var(--muted);
+      }
+
+      .vault-affirm li b {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .vault-value {
+        font-family: var(--serif);
+        font-style: italic;
+        font-size: 20px;
+        color: var(--accent);
+        margin: 26px 0 0;
+      }
+
+      .vault-link {
+        margin-top: 30px;
+      }
+
+      /* Crafted vault entry — a designed artifact, not a generic code block. */
+      .vault-entry {
+        background: var(--bg-code);
+        border: 1px solid var(--line-strong);
+        border-radius: 11px;
         overflow: hidden;
+        box-shadow: 0 30px 70px -40px rgba(0, 0, 0, 0.8);
       }
 
+      .vault-entry .vault-bar {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #241e16, #1e1912);
+      }
+
+      .vault-entry .vault-bar svg {
+        height: 18px;
+        width: 18px;
+        flex: none;
+        opacity: 0.95;
+      }
+
+      .vault-entry .vault-path {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--muted-2);
+      }
+
+      .vault-entry .vault-file {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--text);
+      }
+
+      .vault-entry .vault-tag {
+        margin-left: auto;
+        font-family: var(--sans);
+        font-size: 10.5px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        border-radius: 999px;
+        padding: 3px 10px;
+      }
+
+      pre.code {
+        margin: 0;
+        padding: 22px 22px 24px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13.5px;
+        line-height: 1.78;
+        color: var(--text);
+        counter-reset: ln;
+      }
+
+      pre.code .row {
+        display: block;
+        white-space: pre;
+      }
+
+      pre.code .row::before {
+        counter-increment: ln;
+        content: counter(ln);
+        display: inline-block;
+        width: 2.2em;
+        margin-right: 1.4em;
+        text-align: right;
+        color: #564a39;
+        user-select: none;
+      }
+
+      /* Restrained syntax tones — warm, considered, not rainbow. */
+      .c-dash {
+        color: var(--accent);
+      }
+      .c-key {
+        color: #c9bca5;
+      }
+      .c-str {
+        color: #d6b27a;
+      }
+      .c-val {
+        color: #b9c2b0;
+      }
+      .c-punc {
+        color: var(--muted-2);
+      }
+
+      /* ---------- Marketplace ---------- */
       .market {
-        background: linear-gradient(180deg, #10151b, #0b0e12);
-        border-block: 1px solid rgba(255, 255, 255, 0.07);
+        border-block: 1px solid var(--line);
+        background: linear-gradient(180deg, #19140e, #15120d);
       }
 
-      .market-inner {
-        max-width: 860px;
+      .market-wrap {
+        max-width: 760px;
+      }
+
+      .market-wrap h2 {
+        font-size: clamp(36px, 5.4vw, 62px);
+        margin-bottom: 30px;
+      }
+
+      .market-wrap .body {
+        font-size: 18px;
+      }
+
+      .market-wrap .body + .body {
+        margin-top: 22px;
+      }
+
+      .market-wrap .closer {
+        font-family: var(--serif);
+        font-style: italic;
+        color: var(--text);
+        font-size: 22px;
+        margin-top: 30px;
       }
 
       .status-note {
-        border-left: 3px solid var(--green);
-        color: var(--muted);
-        font-size: 14px;
-        line-height: 1.6;
-        margin-top: 24px;
-        padding-left: 14px;
+        margin-top: 40px;
+        font-size: 13.5px;
+        color: var(--muted-2);
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 9px 16px;
       }
 
+      .status-note .dot {
+        height: 7px;
+        width: 7px;
+        border-radius: 999px;
+        background: var(--accent);
+        flex: none;
+      }
+
+      /* ---------- Footer CTA ---------- */
       .footer-cta {
-        padding-bottom: 110px;
+        text-align: center;
       }
 
-      footer {
-        border-top: 1px solid rgba(255, 255, 255, 0.07);
+      .footer-cta .inner {
+        max-width: 720px;
+        margin: 0 auto;
+      }
+
+      .footer-cta h2 {
+        font-size: clamp(34px, 5vw, 58px);
+      }
+
+      .footer-cta .body {
+        font-size: 18px;
+        margin: 26px auto 0;
+        max-width: 56ch;
+      }
+
+      .footer-cta .hero-actions {
+        justify-content: center;
+        margin-top: 40px;
+      }
+
+      /* ---------- Footer ---------- */
+      footer.site {
+        border-top: 1px solid var(--line);
+        padding: 34px 0;
+      }
+
+      .foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+
+      .foot .brand {
+        font-size: 18px;
+      }
+
+      .foot .brand svg {
+        height: 26px;
+        width: 26px;
+      }
+
+      .foot-links {
+        display: flex;
+        gap: 26px;
+        font-size: 14px;
+      }
+
+      .foot-links a {
         color: var(--muted);
-        padding: 30px 0;
+        transition: color 0.18s ease;
       }
 
-      @media (max-width: 860px) {
+      .foot-links a:hover {
+        color: var(--accent);
+      }
+
+      /* ---------- Deliberate reveal (enhancement only) ---------- */
+      .js .reveal {
+        opacity: 0;
+        transform: translateY(16px);
+        transition:
+          opacity 0.7s cubic-bezier(0.2, 0.6, 0.2, 1),
+          transform 0.7s cubic-bezier(0.2, 0.6, 0.2, 1);
+        will-change: opacity, transform;
+      }
+
+      .js .reveal.in {
+        opacity: 1;
+        transform: none;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: 3px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        .js .reveal {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+        .btn,
+        .link .arw,
+        .nav-links a::after {
+          transition: none;
+        }
+      }
+
+      /* ---------- Responsive ---------- */
+      @media (max-width: 940px) {
+        .vault-grid {
+          grid-template-columns: 1fr;
+          gap: 36px;
+        }
+      }
+
+      @media (max-width: 820px) {
+        section {
+          padding: 96px 0;
+        }
+        .cards {
+          grid-template-columns: 1fr;
+          gap: 14px;
+        }
+        .card {
+          min-height: 0;
+        }
+      }
+
+      @media (max-width: 720px) {
         .nav-links {
           display: none;
         }
-
-        .hero {
-          padding-top: 64px;
+        body {
+          font-size: 16px;
         }
-
-        .hero-grid,
-        .problem-grid,
-        .solution-grid,
-        .status-grid,
-        .vault {
-          grid-template-columns: 1fr;
-        }
-
-        .terminal {
-          margin-top: 10px;
+        .shell {
+          padding: 0 20px;
         }
       }
     </style>
   </head>
-  <body>
+
+  <body id="top">
     <header>
       <div class="shell">
         <nav>
-          <a class="brand" href="#top" aria-label="Marouba home">
-            <span class="mark" aria-hidden="true"></span>
+          <a class="brand" href="#top" aria-label="Marouba — home">
+            <!-- Marouba 3-node mark: rings at top-centre, left-middle, bottom-right -->
+            <svg viewBox="0 0 32 32" fill="none" role="img" aria-label="Marouba logo">
+              <defs>
+                <linearGradient id="mg" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+                  <stop offset="0" stop-color="#9333ea" />
+                  <stop offset="1" stop-color="#4c1d95" />
+                </linearGradient>
+              </defs>
+              <g stroke="url(#mg)" stroke-width="1.7" stroke-linecap="round">
+                <line x1="16" y1="6.5" x2="6.5" y2="18" />
+                <line x1="6.5" y1="18" x2="25.5" y2="25.5" />
+                <line x1="16" y1="6.5" x2="25.5" y2="25.5" />
+                <circle cx="16" cy="6.5" r="3.4" fill="#15120d" />
+                <circle cx="6.5" cy="18" r="3.4" fill="#15120d" />
+                <circle cx="25.5" cy="25.5" r="3.4" fill="#15120d" />
+              </g>
+            </svg>
             <span>Marouba</span>
           </a>
-          <div class="nav-links" aria-label="Primary navigation">
+
+          <div class="nav-links" aria-label="Primary">
             <a href="#problem">Problem</a>
             <a href="#solution">Solution</a>
-            <a href="#demo">Demo</a>
             <a href="#vault">Vault</a>
             <a href="#marketplace">Marketplace</a>
             <a href="https://github.com/nxeratech/marouba">GitHub</a>
           </div>
+
+          <a class="btn btn-primary btn-sm" href="https://github.com/nxeratech/marouba">
+            Star on GitHub <span class="arw" aria-hidden="true">→</span>
+          </a>
         </nav>
       </div>
     </header>
 
-    <main id="top">
+    <main>
+      <!-- HERO -->
       <section class="hero">
-        <div class="shell hero-grid">
-          <div>
-            <p class="eyebrow">Any app. Any workflow. Any agent.</p>
-            <h1>Your computer should know how you work.</h1>
-            <p class="subhead">Not how everyone works. How you work.</p>
-            <p class="lead">
-              Teach it once. It remembers every decision, every route, every fix - forever.
-              Open source. Yours to keep.
-            </p>
-            <div class="hero-actions">
-              <a class="button" href="https://github.com/nxeratech/marouba">Star on GitHub &rarr;</a>
-              <a class="button secondary" href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault spec &rarr;</a>
-            </div>
-          </div>
-
-          <div id="demo" class="terminal" aria-label="Marouba terminal preview">
-            <div class="terminal-bar">
-              <span class="dot red"></span>
-              <span class="dot yellow"></span>
-              <span class="dot green"></span>
-            </div>
-            <pre>[Marouba] Loading workflow: comfyui-generate-image
-[Marouba] Route order: api, cli, uia, visual, ask
-[Marouba] Trying route: api
-[Marouba] Prompt queued: 8b31...
-[Marouba] Complete. Output: vault/runs/output.png
-[Marouba] Run logged.
-
-vault/workflows/comfyui-generate-image.md
-status: portable, inspectable, yours</pre>
+        <div class="shell">
+          <p class="eyebrow reveal">Any app. Any workflow. Any agent.</p>
+          <h1 class="reveal">Your computer should know how you work.</h1>
+          <p class="subhead reveal">Not how everyone works. How <em>you</em> work.</p>
+          <p class="body reveal">
+            Teach it once. It remembers every decision, every route, every fix —
+            forever. Open source. Yours to keep.
+          </p>
+          <div class="hero-actions reveal">
+            <a class="btn btn-primary" href="https://github.com/nxeratech/marouba">
+              Star on GitHub <span class="arw" aria-hidden="true">→</span>
+            </a>
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md"
+            >
+              Read the vault spec <span class="arw" aria-hidden="true">→</span>
+            </a>
           </div>
         </div>
       </section>
 
-      <section id="problem" class="problem">
+      <hr class="rule" />
+
+      <!-- THE PROBLEM -->
+      <section id="problem">
         <div class="shell">
           <div class="section-head">
-            <p class="eyebrow">The problem</p>
-            <h2>The frontier labs are building smarter models. Nobody is building memory with real human taste.</h2>
-            <p>
-              AI tools that look at your screen are slow, expensive, and learn nothing. Every session
-              starts from zero. Every workflow re-explained. Every fix forgotten. The industry's
-              answer is bigger models and longer context windows. But the problem is not intelligence.
-              It is memory.
+            <p class="eyebrow reveal">The Problem</p>
+            <h2 class="reveal">
+              The frontier labs are building smarter models. Nobody is building
+              memory with real human taste.
+            </h2>
+            <p class="body reveal">
+              AI tools that look at your screen are slow, expensive, and learn
+              nothing. Every session starts from zero. Every workflow re-explained.
+              Every fix forgotten. The industry's answer is bigger models and longer
+              context windows. But the problem is not intelligence. It is memory.
             </p>
           </div>
-          <div class="problem-grid">
-            <article class="card">
-              <strong>Every workflow is re-taught</strong>
+
+          <div class="cards">
+            <article class="card reveal">
+              <span class="idx">01</span>
+              <h3>Every workflow is re-taught</h3>
               <p>
-                The average knowledge worker repeats the same digital workflows dozens of times a
-                month. AI agents start from scratch every single time.
+                The average knowledge worker repeats the same digital workflows
+                dozens of times a month. AI agents start from scratch every single
+                time.
               </p>
             </article>
-            <article class="card">
-              <strong>Every update breaks automation</strong>
+            <article class="card reveal">
+              <span class="idx">02</span>
+              <h3>Every update breaks automation</h3>
               <p>
-                A button moves, a dialog changes, a version updates. Every fragile pixel-click loop
-                breaks completely and silently.
+                A button moves, a dialog changes, a version updates. Every fragile
+                pixel-click loop breaks completely and silently.
               </p>
             </article>
-            <article class="card">
-              <strong>Every fix disappears</strong>
+            <article class="card reveal">
+              <span class="idx">03</span>
+              <h3>Every fix disappears</h3>
               <p>
-                When something breaks and you fix it manually, that fix vanishes. It never becomes
-                shared knowledge. You do it again next time.
+                When something breaks and you fix it manually, that fix vanishes. It
+                never becomes shared knowledge. You do it again next time.
               </p>
             </article>
           </div>
         </div>
       </section>
 
+      <hr class="rule" />
+
+      <!-- THE SOLUTION -->
       <section id="solution">
         <div class="shell">
           <div class="section-head">
-            <p class="eyebrow">The solution</p>
-            <h2>Teach once. Replay forever. Correct once.</h2>
-            <p>
-              Marouba works with any app on Windows or Mac. Photoshop. Ableton. AutoCAD. Excel.
-              Blender. Your terminal. Your browser. Anything you can do, Marouba can remember. It
-              does not guess. It does not look at your screen and hope. It knows - because you
-              showed it once.
+            <p class="eyebrow reveal">The Solution</p>
+            <h2 class="reveal">Teach once. Replay forever. Correct once.</h2>
+            <p class="body reveal">
+              Marouba works with any app on Windows or Mac. Photoshop. Ableton.
+              AutoCAD. Excel. Blender. Your terminal. Your browser. Anything you can
+              do, Marouba can remember. It does not guess. It does not look at your
+              screen and hope. It knows — because you showed it once.
             </p>
           </div>
-          <div class="solution-grid">
-            <article class="card mode">
-              <strong>Teach</strong>
+
+          <div class="cards steps">
+            <article class="card reveal">
+              <span class="idx">Teach</span>
+              <h3>Teach</h3>
               <p>
-                Perform your workflow normally. Marouba observes the context, the route, and the
-                intent behind what you did. Stored as human-readable Markdown in a vault that belongs
-                to you.
+                Perform your workflow normally. Marouba observes the context, the
+                route, and the intent behind what you did. Stored as human-readable
+                Markdown in a vault that belongs to you.
               </p>
             </article>
-            <article class="card mode">
-              <strong>Replay</strong>
+            <article class="card reveal">
+              <span class="idx">Replay</span>
+              <h3>Replay</h3>
               <p>
-                Need the same workflow again? Marouba tries every known route in order - cheapest
-                first. API, scripting, UI elements, keyboard shortcuts. If one breaks, it falls back
-                to the next.
+                Need the same workflow again? Marouba tries every known route in
+                order — cheapest first. API, scripting, UI elements, keyboard
+                shortcuts. If one breaks, it falls back to the next.
               </p>
             </article>
-            <article class="card mode">
-              <strong>Repair</strong>
+            <article class="card reveal">
+              <span class="idx">Repair</span>
+              <h3>Repair</h3>
               <p>
-                When something moves or breaks, Marouba asks you to correct it once, records the fix,
-                and never asks again. The vault updates. The next run just works.
+                When something moves or breaks, Marouba asks you to correct it once,
+                records the fix, and never asks again. The vault updates. The next
+                run just works.
               </p>
             </article>
           </div>
         </div>
       </section>
 
-      <section class="status-section">
-        <div class="shell">
-          <div class="section-head">
-            <p class="eyebrow">Today vs Roadmap</p>
-            <h2>What works now, and what comes next.</h2>
-          </div>
-          <div class="status-grid">
-            <article class="status-card">
-              <h3>Today (working)</h3>
-              <ul>
-                <li>Vault format</li>
-                <li>Teach mode</li>
-                <li>Replay</li>
-                <li>Repair loop</li>
-                <li>ComfyUI + 4 other app profiles</li>
-                <li>Marketplace signing</li>
-              </ul>
-            </article>
-            <article class="status-card">
-              <h3>Roadmap</h3>
-              <ul>
-                <li>Companion app UI</li>
-                <li>Mac port</li>
-                <li>Live marketplace</li>
-                <li>Payments</li>
-              </ul>
-            </article>
-            <article class="status-card">
-              <h3>Source of truth</h3>
-              <ul>
-                <li><a href="https://github.com/nxeratech/marouba">GitHub repository</a></li>
-                <li><a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec &rarr;</a></li>
-              </ul>
-            </article>
-          </div>
-        </div>
-      </section>
+      <hr class="rule" />
 
+      <!-- THE VAULT -->
       <section id="vault">
-        <div class="shell vault">
-          <div class="vault-copy">
-            <p class="eyebrow">The vault</p>
-            <h2>Not a macro. Not a script. A living record of how you work.</h2>
-            <p>
-              Traditional automations store actions: click here, type this, press Enter. Marouba
-              vaults store every route - element names, shortcuts, commands - as human-readable
-              Markdown, plus fallback paths, verification rules, and repair history.
-            </p>
-            <p>Human readable. Editable directly. Portable. Yours.</p>
-            <p>Git-friendly. Obsidian-compatible.</p>
-            <p>
-              Shareable with any agent in your stack - Barry, Claude, n8n, anything with an HTTP
-              call.
-            </p>
-            <p>A value system built into the architecture.</p>
-            <p>
-              <a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec &rarr;</a>
-            </p>
-          </div>
-          <div class="vault-code">
-            <pre>---
-id: photoshop-export-for-web
-app: Photoshop
-routes:
-  - type: cli
-    command: "photoshop.exe -r export.jsx"
-  - type: uia
-    element: Save for Web
-  - type: shortcut
-    keys: [ctrl, alt, shift, s]
-fallback_order: [cli, uia, shortcut, ask]
-verification:
-  type: file_exists
-  path: "{output_path}"
----</pre>
+        <div class="shell">
+          <div class="vault-grid">
+            <div class="vault-copy">
+              <p class="eyebrow reveal">The Vault</p>
+              <h2 class="reveal">
+                Not a macro. Not a script. A living record of how you work.
+              </h2>
+              <p class="body reveal" style="margin-top: 24px">
+                Traditional automations store actions: click here, type this, press
+                Enter. Marouba vaults store every route — element names, shortcuts,
+                commands — as human-readable Markdown, plus fallback paths,
+                verification rules, and repair history.
+              </p>
+              <ul class="vault-affirm reveal">
+                <li><b>Human readable. Editable directly. Portable. Yours.</b></li>
+                <li>Git-friendly. Obsidian-compatible.</li>
+                <li>
+                  Shareable with any agent in your stack — Barry, Claude, n8n,
+                  anything with an HTTP call.
+                </li>
+              </ul>
+              <p class="vault-value reveal">A value system built into the architecture.</p>
+              <p class="vault-link reveal">
+                <a
+                  class="link"
+                  href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md"
+                >
+                  Read the vault format spec <span class="arw" aria-hidden="true">→</span>
+                </a>
+              </p>
+            </div>
+
+            <div class="vault-entry reveal">
+              <div class="vault-bar">
+                <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                  <g stroke="url(#mg)" stroke-width="1.7" stroke-linecap="round">
+                    <line x1="16" y1="6.5" x2="6.5" y2="18" />
+                    <line x1="6.5" y1="18" x2="25.5" y2="25.5" />
+                    <line x1="16" y1="6.5" x2="25.5" y2="25.5" />
+                    <circle cx="16" cy="6.5" r="3.4" fill="#211c15" />
+                    <circle cx="6.5" cy="18" r="3.4" fill="#211c15" />
+                    <circle cx="25.5" cy="25.5" r="3.4" fill="#211c15" />
+                  </g>
+                </svg>
+                <span class="vault-path">vault/workflows/</span
+                ><span class="vault-file">photoshop-export-for-web.md</span>
+                <span class="vault-tag">Vault entry</span>
+              </div>
+              <pre class="code"><span class="row"><span class="c-dash">---</span></span><span class="row"><span class="c-key">id</span><span class="c-punc">:</span> photoshop-export-for-web</span><span class="row"><span class="c-key">app</span><span class="c-punc">:</span> Photoshop</span><span class="row"><span class="c-key">routes</span><span class="c-punc">:</span></span><span class="row">  <span class="c-dash">-</span> <span class="c-key">type</span><span class="c-punc">:</span> <span class="c-val">cli</span></span><span class="row">    <span class="c-key">command</span><span class="c-punc">:</span> <span class="c-str">"photoshop.exe -r export.jsx"</span></span><span class="row">  <span class="c-dash">-</span> <span class="c-key">type</span><span class="c-punc">:</span> <span class="c-val">uia</span></span><span class="row">    <span class="c-key">element</span><span class="c-punc">:</span> Save for Web</span><span class="row">  <span class="c-dash">-</span> <span class="c-key">type</span><span class="c-punc">:</span> <span class="c-val">shortcut</span></span><span class="row">    <span class="c-key">keys</span><span class="c-punc">:</span> <span class="c-punc">[</span>ctrl, alt, shift, s<span class="c-punc">]</span></span><span class="row"><span class="c-key">fallback_order</span><span class="c-punc">:</span> <span class="c-punc">[</span>cli, uia, shortcut, ask<span class="c-punc">]</span></span><span class="row"><span class="c-key">verification</span><span class="c-punc">:</span></span><span class="row">  <span class="c-key">type</span><span class="c-punc">:</span> <span class="c-val">file_exists</span></span><span class="row">  <span class="c-key">path</span><span class="c-punc">:</span> <span class="c-str">"{output_path}"</span></span><span class="row"><span class="c-dash">---</span></span></pre>
+            </div>
           </div>
         </div>
       </section>
 
+      <hr class="rule" />
+
+      <!-- THE MARKETPLACE -->
       <section id="marketplace" class="market">
-        <div class="shell market-inner">
-          <p class="eyebrow">Marketplace</p>
-          <h2>Your taste has value.</h2>
-          <p>
-            The way you work - your process, your decisions, your creative instincts - is worth
-            something to someone who wants to do it the same way.
-          </p>
-          <p>
-            Sample pack creators. Photoshop artists. AutoCAD architects. Excel power users. Ableton
-            producers. Whatever you make, however you make it - there is an audience that wants to
-            learn from you, not just watch you.
-          </p>
-          <p>Record your process. Publish it to the marketplace. Set your own price. Get paid directly.</p>
-          <p>
-            For too long, platforms have mined human creativity without consent or compensation.
-            Factories are fitting workers with cameras to record their movements for robots -
-            without asking. Frontier labs train on creative work - without paying.
-          </p>
-          <p>Marouba is the alternative. Your knowledge. Your price. Your vault.</p>
-          <p class="status-note">
-            Marketplace coming after open source launch. Early contributors get founder status.
-          </p>
+        <div class="shell">
+          <div class="market-wrap">
+            <p class="eyebrow reveal">Marketplace</p>
+            <h2 class="reveal">Your taste has value.</h2>
+            <p class="body reveal">
+              The way you work — your process, your decisions, your creative
+              instincts — is worth something to someone who wants to do it the same
+              way.
+            </p>
+            <p class="body reveal">
+              Sample pack creators. Photoshop artists. AutoCAD architects. Excel
+              power users. Ableton producers. Whatever you make, however you make it
+              — there is an audience that wants to learn from you, not just watch
+              you.
+            </p>
+            <p class="body reveal">
+              Record your process. Publish it to the marketplace. Set your own price.
+              Get paid directly.
+            </p>
+            <p class="body reveal">
+              For too long, platforms have mined human creativity without consent or
+              compensation. Factories are fitting workers with cameras to record
+              their movements for robots — without asking. Frontier labs train on
+              creative work — without paying.
+            </p>
+            <p class="closer reveal">
+              Marouba is the alternative. Your knowledge. Your price. Your vault.
+            </p>
+            <div class="reveal">
+              <span class="status-note">
+                <span class="dot" aria-hidden="true"></span>
+                Marketplace coming after open source launch. Early contributors get
+                founder status.
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 
+      <hr class="rule" />
+
+      <!-- FOOTER CTA -->
       <section class="footer-cta">
         <div class="shell">
-          <div class="section-head">
-            <h2>Open source. Free forever. Yours to keep.</h2>
-            <p>
-              The engine is open. The vault is yours. No subscriptions, no lock-in, no platform that
-              disappears and takes your workflows with it.
+          <div class="inner">
+            <h2 class="reveal">Open source. Free forever. Yours to keep.</h2>
+            <p class="body reveal">
+              The engine is open. The vault is yours. No subscriptions, no lock-in,
+              no platform that disappears and takes your workflows with it.
             </p>
-            <div class="cta-actions">
-              <a class="button" href="https://github.com/nxeratech/marouba">Star on GitHub &rarr;</a>
-              <a class="button secondary" href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault spec &rarr;</a>
+            <div class="hero-actions reveal">
+              <a class="btn btn-primary" href="https://github.com/nxeratech/marouba">
+                Star on GitHub <span class="arw" aria-hidden="true">→</span>
+              </a>
+              <a
+                class="btn btn-ghost"
+                href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md"
+              >
+                Read the vault spec <span class="arw" aria-hidden="true">→</span>
+              </a>
             </div>
           </div>
         </div>
       </section>
     </main>
 
-    <footer>
-      <div class="shell">Marouba by NXeraTech. Teach once. Replay forever. Correct once.</div>
+    <footer class="site">
+      <div class="shell">
+        <div class="foot">
+          <a class="brand" href="#top" aria-label="Marouba — home">
+            <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <g stroke="url(#mg)" stroke-width="1.7" stroke-linecap="round">
+                <line x1="16" y1="6.5" x2="6.5" y2="18" />
+                <line x1="6.5" y1="18" x2="25.5" y2="25.5" />
+                <line x1="16" y1="6.5" x2="25.5" y2="25.5" />
+                <circle cx="16" cy="6.5" r="3.4" fill="#15120d" />
+                <circle cx="6.5" cy="18" r="3.4" fill="#15120d" />
+                <circle cx="25.5" cy="25.5" r="3.4" fill="#15120d" />
+              </g>
+            </svg>
+            <span>Marouba</span>
+          </a>
+          <div class="foot-links">
+            <a href="https://github.com/nxeratech/marouba">Star on GitHub →</a>
+            <a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md"
+              >Read the vault spec →</a
+            >
+          </div>
+        </div>
+      </div>
     </footer>
+
+    <script>
+      // Deliberate, single-purpose reveal. No library, respects reduced motion,
+      // and degrades to fully-visible content if unsupported.
+      (function () {
+        var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var nodes = document.querySelectorAll(".reveal");
+        if (reduce || !("IntersectionObserver" in window)) {
+          nodes.forEach(function (n) {
+            n.classList.add("in");
+          });
+          return;
+        }
+        var io = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                e.target.classList.add("in");
+                io.unobserve(e.target);
+              }
+            });
+          },
+          { rootMargin: "0px 0px -8% 0px", threshold: 0.12 }
+        );
+        nodes.forEach(function (n) {
+          io.observe(n);
+        });
+      })();
+    </script>
   </body>
 </html>
