@@ -234,7 +234,8 @@
       }
 
       .problem-grid,
-      .solution-grid {
+      .solution-grid,
+      .status-grid {
         display: grid;
         gap: 16px;
         grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -275,6 +276,30 @@
       .demo {
         background: #0b0f14;
         border-top: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .status-section {
+        background: #08090b;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .status-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 22px;
+      }
+
+      .status-card h3 {
+        font-size: 22px;
+        margin: 0 0 16px;
+      }
+
+      .status-card ul {
+        color: var(--muted);
+        line-height: 1.8;
+        margin: 0;
+        padding-left: 20px;
       }
 
       .demo-flow {
@@ -431,6 +456,7 @@
         .hero-grid,
         .problem-grid,
         .solution-grid,
+        .status-grid,
         .demo-flow,
         .vault,
         .market-inner,
@@ -470,8 +496,8 @@
             <p class="eyebrow">Open source workflow memory engine</p>
             <h1>Your computer should remember what you taught it.</h1>
             <p class="lead">
-              Marouba learns your workflows once, replays them forever, and repairs itself when
-              things change. Teach your computer how work gets done. Once.
+              Marouba learns your workflows once, replays them forever, and asks you to correct it
+              once, records the fix, and never asks again when things change.
             </p>
             <div class="hero-actions">
               <a class="button" href="#waitlist">Join the waitlist</a>
@@ -531,7 +557,7 @@ status: portable, inspectable, yours</pre>
         <div class="shell">
           <div class="section-head">
             <p class="eyebrow">The solution</p>
-            <h2>Marouba: teach once. Replay forever. Repair itself.</h2>
+            <h2>Marouba: teach once. Replay forever. Correct once.</h2>
           </div>
           <div class="solution-grid">
             <article class="card mode">
@@ -540,11 +566,49 @@ status: portable, inspectable, yours</pre>
             </article>
             <article class="card mode">
               <strong>Replay</strong>
-              <p>Need the same workflow again? Marouba replays it from the vault, even when the screen layout changes.</p>
+              <p>Need the same workflow again? Marouba tries every known route in order — if one breaks, it falls back to the next.</p>
             </article>
             <article class="card mode">
               <strong>Repair</strong>
-              <p>When something moves or breaks, Marouba asks once, writes the fix back, and never asks again for that failure.</p>
+              <p>When something moves or breaks, Marouba asks you to correct it once, records the fix, and never asks again.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="status-section">
+        <div class="shell">
+          <div class="section-head">
+            <p class="eyebrow">Today vs Roadmap</p>
+            <h2>What works now, and what comes next.</h2>
+          </div>
+          <div class="status-grid">
+            <article class="status-card">
+              <h3>Today (working)</h3>
+              <ul>
+                <li>Vault format</li>
+                <li>Teach mode</li>
+                <li>Replay</li>
+                <li>Repair loop</li>
+                <li>ComfyUI + 4 other app profiles</li>
+                <li>Marketplace signing</li>
+              </ul>
+            </article>
+            <article class="status-card">
+              <h3>Roadmap</h3>
+              <ul>
+                <li>Companion app UI</li>
+                <li>Mac port</li>
+                <li>Live marketplace</li>
+                <li>Payments</li>
+              </ul>
+            </article>
+            <article class="status-card">
+              <h3>Source of truth</h3>
+              <ul>
+                <li><a href="https://github.com/nxeratech/marouba">GitHub repository</a></li>
+                <li><a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec →</a></li>
+              </ul>
             </article>
           </div>
         </div>
@@ -555,7 +619,7 @@ status: portable, inspectable, yours</pre>
           <div class="section-head">
             <p class="eyebrow">See how it works</p>
             <h2>A 60-second demo flow.</h2>
-            <p>This is the placeholder for the launch video: a real desktop workflow taught once, replayed the next day, then repaired after an app update.</p>
+            <p>This is the placeholder for the launch video: a real desktop workflow taught once, replayed the next day, then corrected once after an app update.</p>
           </div>
           <div class="demo-flow">
             <article class="demo-step">
@@ -566,7 +630,7 @@ status: portable, inspectable, yours</pre>
             <article class="demo-step">
               <span>00:08</span>
               <strong>Today I am teaching it once.</strong>
-              <p>Open Photoshop, apply the same filters, export, save. Marouba records the intent, not just the clicks.</p>
+              <p>Open Photoshop, apply the same filters, export, save. Marouba stores every route — element names, shortcuts, commands — as human-readable Markdown.</p>
             </article>
             <article class="demo-step">
               <span>00:15</span>
@@ -580,12 +644,12 @@ status: portable, inspectable, yours</pre>
             </article>
             <article class="demo-step">
               <span>00:28</span>
-              <strong>Marouba repairs the workflow.</strong>
-              <p>It finds the new path, completes the task, and writes the repair back to the vault.</p>
+              <strong>Marouba records the correction.</strong>
+              <p>It asks you to correct it once, records the fix, and never asks again.</p>
             </article>
             <article class="demo-step">
               <span>00:49</span>
-              <strong>Teach once. Replay forever. Repair itself.</strong>
+              <strong>Teach once. Replay forever. Correct once.</strong>
               <p>The same loop works across Photoshop, Excel, Ableton, Chrome, and any desktop app with a profile.</p>
             </article>
           </div>
@@ -599,8 +663,12 @@ status: portable, inspectable, yours</pre>
             <h2>Not a macro. Not a script. A living record of how you work.</h2>
             <p>
               Traditional automations store actions: click here, type this, press Enter. Marouba
-              vaults store intent, routes, fallback paths, screen state, verification rules, and
-              repair history. They are git-friendly, human-readable, portable, inspectable, and yours.
+              vaults store every route — element names, shortcuts, commands — as human-readable
+              Markdown, plus fallback paths, verification rules, and repair history. They are
+              git-friendly, portable, inspectable, and yours.
+            </p>
+            <p>
+              <a href="https://github.com/nxeratech/marouba/blob/main/VAULT_SPEC.md">Read the vault format spec →</a>
             </p>
           </div>
           <div class="vault-code">
@@ -626,12 +694,13 @@ verification:
       <section class="market">
         <div class="shell market-inner">
           <div>
-            <p class="eyebrow">Marketplace</p>
-            <h2>Your workflows have value. You should be able to share it.</h2>
+            <p class="eyebrow">Marketplace roadmap</p>
+            <h2>Coming: The Marketplace.</h2>
             <p>
-              Built a perfect Photoshop export workflow? A bulletproof Ableton mastering chain? A
-              reliable ComfyUI production route? Publish it as a signed vault. Buyers download it,
-              it adapts to their machine, and every repair makes the workflow more trustworthy.
+              Your workflows have value. The roadmap is a signed workflow marketplace where creators
+              package vaults for real apps, buyers install them, and Marouba tries every known route
+              in order — if one breaks, it falls back to the next. Revenue split: 70% creator, 30%
+              platform.
             </p>
           </div>
           <div class="split" aria-label="Marketplace revenue split">
@@ -685,7 +754,7 @@ verification:
     </main>
 
     <footer>
-      <div class="shell">Marouba by NXeraTech. Teach once. Replay forever. Repair itself.</div>
+      <div class="shell">Marouba by NXeraTech. Teach once. Replay forever. Correct once.</div>
     </footer>
 
     <script>
