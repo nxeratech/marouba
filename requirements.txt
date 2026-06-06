@@ -1,0 +1,7 @@
+python-frontmatter>=1.1.0
+pytest>=8.0.0
+cryptography>=42.0.0
+pywinauto>=0.6.8; platform_system == "Windows"
+pyautogui>=0.9.54; platform_system == "Windows"
+keyboard>=0.13.5; platform_system == "Windows"
+pynput>=1.7.7; platform_system == "Windows"

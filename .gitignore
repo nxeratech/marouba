@@ -1,0 +1,7 @@
+marketplace/keys/*private*
+__pycache__/
+.pytest_cache/
+companion/src-tauri/target/
+companion-mac/src-tauri/target/
+companion/dist/
+*.pem

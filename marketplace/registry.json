@@ -1,0 +1,37 @@
+{
+  "workflows": [
+    {
+      "id": "comfyui-generate-image-001",
+      "name": "ComfyUI Generate Image",
+      "app": "ComfyUI",
+      "author": "nxeratech",
+      "version": "0.1.0",
+      "price_usd": "0.00",
+      "category": "image-generation",
+      "tags": ["comfyui", "generate", "image"],
+      "workflow_path": "vault/workflows/comfyui-generate-image-001.md"
+    },
+    {
+      "id": "photoshop-export-for-web",
+      "name": "Photoshop Export for Web",
+      "app": "Photoshop",
+      "author": "nxeratech",
+      "version": "0.1.0",
+      "price_usd": "0.00",
+      "category": "image-export",
+      "tags": ["photoshop", "export", "web"],
+      "workflow_path": "profiles/photoshop/workflows/export-for-web.md"
+    },
+    {
+      "id": "ableton-bounce-stems",
+      "name": "Ableton Bounce Stems",
+      "app": "Ableton Live",
+      "author": "nxeratech",
+      "version": "0.1.0",
+      "price_usd": "0.00",
+      "category": "audio-export",
+      "tags": ["ableton", "stems", "export"],
+      "workflow_path": "profiles/ableton/workflows/bounce-stems.md"
+    }
+  ]
+}
