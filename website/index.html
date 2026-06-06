@@ -8,7 +8,7 @@
       name="description"
       content="Marouba is an open source workflow memory engine. Teach it once. It remembers every decision, every route, every fix — forever."
     />
-    <meta name="theme-color" content="#15120D" />
+    <meta name="theme-color" content="#0C0B14" />
 
     <!-- Single Google Font (Geist — clean geometric sans matching the logo
          wordmark). Degrades gracefully to system sans if Google Fonts is
@@ -29,15 +29,15 @@
 
     <style>
       :root {
-        /* A warm espresso near-black — ink-on-paper, not the usual cold #0d0d0d. */
-        --bg: #15120d;
-        --bg-2: #1c1813;
-        --bg-code: #211c15;
-        --line: #322a20;
-        --line-strong: #463a2b;
-        --text: #f4efe6; /* warm paper white */
-        --muted: #aba08d; /* warm grey */
-        --muted-2: #7e7565;
+        /* Night-sky base — a very dark blue-black, the colour of a clear sky. */
+        --bg: #0c0b14;
+        --bg-2: #13121d;
+        --bg-code: #14131f;
+        --line: #211f30;
+        --line-strong: #322f47;
+        --text: #eef0f7; /* moonlight off-white */
+        --muted: #a6a8bd; /* cool grey */
+        --muted-2: #6e7188;
         /* Accent pulled from the logo's purple gradient (#9333ea→#4c1d95):
            light purple for eyebrows + link arrows; muted purple for the
            primary button. */
@@ -312,11 +312,36 @@
         height: 100%;
         z-index: 0;
         pointer-events: none;
+        /* Fade toward the bottom so the sky feels like it extends past the fold. */
+        -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 52%, transparent 94%);
+        mask-image: linear-gradient(to bottom, #000 0%, #000 52%, transparent 94%);
       }
 
       .hero .shell {
         position: relative;
         z-index: 1;
+      }
+
+      /* Sparse stars in later sections — like stars appearing as eyes adjust. */
+      .has-stars {
+        position: relative;
+        isolation: isolate;
+      }
+
+      .has-stars > .shell {
+        position: relative;
+        z-index: 1;
+      }
+
+      .starfield {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        pointer-events: none;
+        -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 62%, transparent 100%);
+        mask-image: linear-gradient(to bottom, #000 0%, #000 62%, transparent 100%);
       }
 
       .hero .eyebrow {
@@ -450,7 +475,7 @@
         gap: 11px;
         padding: 13px 18px;
         border-bottom: 1px solid var(--line);
-        background: linear-gradient(180deg, #241e16, #1e1912);
+        background: linear-gradient(180deg, #1b1a28, #141320);
       }
 
       .vault-entry .vault-bar svg {
@@ -507,22 +532,22 @@
         width: 2.2em;
         margin-right: 1.4em;
         text-align: right;
-        color: #564a39;
+        color: #3a3950;
         user-select: none;
       }
 
-      /* Restrained syntax tones — warm, considered, not rainbow. */
+      /* Restrained syntax tones — cool, considered, not rainbow. */
       .c-dash {
         color: var(--accent);
       }
       .c-key {
-        color: #c9bca5;
+        color: #b8bdcf;
       }
       .c-str {
-        color: #d6b27a;
+        color: #c2b1e0;
       }
       .c-val {
-        color: #b9c2b0;
+        color: #a9b4c4;
       }
       .c-punc {
         color: var(--muted-2);
@@ -531,7 +556,7 @@
       /* ---------- Marketplace ---------- */
       .market {
         border-block: 1px solid var(--line);
-        background: linear-gradient(180deg, #19140e, #15120d);
+        background: linear-gradient(180deg, #11101b, #0c0b14);
       }
 
       .market-wrap {
@@ -756,41 +781,49 @@
           preserveAspectRatio="xMidYMid slice"
           aria-hidden="true"
         >
-          <g stroke="#9333ea" stroke-width="1" opacity="0.03" fill="none">
-            <line x1="120" y1="90" x2="300" y2="150" />
-            <line x1="300" y1="150" x2="430" y2="240" />
-            <line x1="300" y1="150" x2="210" y2="300" />
-            <line x1="210" y1="300" x2="180" y2="470" />
-            <line x1="180" y1="470" x2="420" y2="500" />
-            <line x1="420" y1="500" x2="430" y2="240" />
-            <line x1="430" y1="240" x2="560" y2="120" />
-            <line x1="560" y1="120" x2="700" y2="300" />
-            <line x1="430" y1="240" x2="700" y2="300" />
-            <line x1="700" y1="300" x2="620" y2="440" />
-            <line x1="620" y1="440" x2="780" y2="560" />
-            <line x1="700" y1="300" x2="860" y2="200" />
-            <line x1="860" y1="200" x2="1080" y2="150" />
-            <line x1="860" y1="200" x2="960" y2="360" />
-            <line x1="960" y1="360" x2="1020" y2="520" />
-            <line x1="780" y1="560" x2="1020" y2="520" />
-            <line x1="960" y1="360" x2="1080" y2="150" />
-            <line x1="620" y1="440" x2="420" y2="500" />
+          <!-- Organic links: a 4-way hub at the centre, a couple of 3-way nodes,
+               several single-link leaves. Asymmetric, no three nodes collinear. -->
+          <g stroke="#9333ea" stroke-width="1" fill="none" stroke-opacity="0.025">
+            <line x1="247" y1="168" x2="388" y2="331" />
+            <line x1="388" y1="331" x2="578" y2="325" />
+            <line x1="578" y1="325" x2="690" y2="210" />
+            <line x1="690" y1="210" x2="905" y2="243" />
+            <line x1="578" y1="325" x2="725" y2="483" />
+            <line x1="725" y1="483" x2="786" y2="362" />
+            <line x1="786" y1="362" x2="905" y2="243" />
+            <line x1="905" y1="243" x2="1079" y2="427" />
+            <line x1="247" y1="168" x2="144" y2="266" />
+            <line x1="144" y1="266" x2="96" y2="402" />
+            <line x1="388" y1="331" x2="338" y2="463" />
+            <line x1="338" y1="463" x2="430" y2="567" />
+            <line x1="725" y1="483" x2="1010" y2="560" />
+            <line x1="578" y1="325" x2="505" y2="235" />
           </g>
-          <g fill="#9333ea" opacity="0.04">
-            <circle cx="120" cy="90" r="4" />
-            <circle cx="300" cy="150" r="3" />
-            <circle cx="210" cy="300" r="5" />
-            <circle cx="430" cy="240" r="4" />
-            <circle cx="560" cy="120" r="3" />
-            <circle cx="700" cy="300" r="4" />
-            <circle cx="620" cy="440" r="3" />
-            <circle cx="860" cy="200" r="5" />
-            <circle cx="960" cy="360" r="4" />
-            <circle cx="1080" cy="150" r="3" />
-            <circle cx="780" cy="560" r="4" />
-            <circle cx="1020" cy="520" r="3" />
-            <circle cx="420" cy="500" r="4" />
-            <circle cx="180" cy="470" r="3" />
+          <g fill="#9333ea">
+            <circle cx="58" cy="93" r="1.6" fill-opacity="0.035" />
+            <circle cx="247" cy="168" r="4" fill-opacity="0.07" />
+            <circle cx="144" cy="266" r="2.2" fill-opacity="0.035" />
+            <circle cx="96" cy="402" r="3" fill-opacity="0.05" />
+            <circle cx="338" cy="463" r="1.8" fill-opacity="0.035" />
+            <circle cx="430" cy="567" r="3" fill-opacity="0.05" />
+            <circle cx="388" cy="331" r="2.4" fill-opacity="0.035" />
+            <circle cx="560" cy="120" r="2" fill-opacity="0.035" />
+            <circle cx="578" cy="325" r="4" fill-opacity="0.07" />
+            <circle cx="690" cy="210" r="2.3" fill-opacity="0.035" />
+            <circle cx="725" cy="483" r="4" fill-opacity="0.07" />
+            <circle cx="786" cy="362" r="1.8" fill-opacity="0.035" />
+            <circle cx="905" cy="243" r="4" fill-opacity="0.07" />
+            <circle cx="1053" cy="122" r="2" fill-opacity="0.035" />
+            <circle cx="1079" cy="427" r="3" fill-opacity="0.05" />
+            <circle cx="1148" cy="210" r="1.6" fill-opacity="0.035" />
+            <circle cx="1010" cy="560" r="2.2" fill-opacity="0.035" />
+            <circle cx="860" cy="610" r="1.8" fill-opacity="0.035" />
+            <circle cx="648" cy="558" r="1.6" fill-opacity="0.035" />
+            <circle cx="210" cy="590" r="1.5" fill-opacity="0.035" />
+            <circle cx="1130" cy="470" r="1.6" fill-opacity="0.035" />
+            <circle cx="505" cy="235" r="1.8" fill-opacity="0.035" />
+            <circle cx="29" cy="315" r="1.5" fill-opacity="0.035" />
+            <circle cx="760" cy="78" r="1.6" fill-opacity="0.035" />
           </g>
         </svg>
         <div class="shell">
@@ -818,7 +851,24 @@
       <hr class="rule" />
 
       <!-- THE PROBLEM -->
-      <section id="problem">
+      <section id="problem" class="has-stars">
+        <svg
+          class="starfield"
+          viewBox="0 0 1200 600"
+          preserveAspectRatio="xMidYMid slice"
+          aria-hidden="true"
+        >
+          <g fill="#9333ea" fill-opacity="0.02">
+            <circle cx="140" cy="110" r="2" />
+            <circle cx="1050" cy="90" r="2.4" />
+            <circle cx="880" cy="300" r="1.6" />
+            <circle cx="300" cy="420" r="2" />
+            <circle cx="640" cy="160" r="1.8" />
+            <circle cx="1140" cy="470" r="1.6" />
+            <circle cx="80" cy="520" r="1.5" />
+            <circle cx="470" cy="500" r="1.6" />
+          </g>
+        </svg>
         <div class="shell">
           <div class="section-head">
             <p class="eyebrow reveal">The Problem</p>
@@ -915,7 +965,24 @@
       <hr class="rule" />
 
       <!-- THE VAULT -->
-      <section id="vault">
+      <section id="vault" class="has-stars">
+        <svg
+          class="starfield"
+          viewBox="0 0 1200 600"
+          preserveAspectRatio="xMidYMid slice"
+          aria-hidden="true"
+        >
+          <g fill="#9333ea" fill-opacity="0.02">
+            <circle cx="90" cy="140" r="2" />
+            <circle cx="1120" cy="120" r="1.8" />
+            <circle cx="960" cy="410" r="2.4" />
+            <circle cx="520" cy="70" r="1.6" />
+            <circle cx="220" cy="500" r="1.8" />
+            <circle cx="1080" cy="540" r="1.5" />
+            <circle cx="700" cy="470" r="1.6" />
+            <circle cx="360" cy="250" r="1.6" />
+          </g>
+        </svg>
         <div class="shell">
           <div class="vault-grid">
             <div class="vault-copy">
@@ -955,9 +1022,9 @@
                     <line x1="16" y1="6.5" x2="6.5" y2="18" />
                     <line x1="6.5" y1="18" x2="25.5" y2="25.5" />
                     <line x1="16" y1="6.5" x2="25.5" y2="25.5" />
-                    <circle cx="16" cy="6.5" r="3.4" fill="#211c15" />
-                    <circle cx="6.5" cy="18" r="3.4" fill="#211c15" />
-                    <circle cx="25.5" cy="25.5" r="3.4" fill="#211c15" />
+                    <circle cx="16" cy="6.5" r="3.4" fill="#14131f" />
+                    <circle cx="6.5" cy="18" r="3.4" fill="#14131f" />
+                    <circle cx="25.5" cy="25.5" r="3.4" fill="#14131f" />
                   </g>
                 </svg>
                 <span class="vault-path">vault/workflows/</span
@@ -1049,9 +1116,9 @@
                 <line x1="16" y1="6.5" x2="6.5" y2="18" />
                 <line x1="6.5" y1="18" x2="25.5" y2="25.5" />
                 <line x1="16" y1="6.5" x2="25.5" y2="25.5" />
-                <circle cx="16" cy="6.5" r="3.4" fill="#15120d" />
-                <circle cx="6.5" cy="18" r="3.4" fill="#15120d" />
-                <circle cx="25.5" cy="25.5" r="3.4" fill="#15120d" />
+                <circle cx="16" cy="6.5" r="3.4" fill="#0c0b14" />
+                <circle cx="6.5" cy="18" r="3.4" fill="#0c0b14" />
+                <circle cx="25.5" cy="25.5" r="3.4" fill="#0c0b14" />
               </g>
             </svg>
             <span>Marouba</span>
