@@ -756,7 +756,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         let focused_window = if target_windows.is_empty() {
             None
         } else {
-            match focus_first_available_window(&target_windows) {
+            match ensure_target_window_ready(&target_windows) {
                 Ok(window_title) => Some(window_title),
                 Err(error) => {
                     let tried = target_windows.join(", ");
@@ -767,7 +767,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
                     return (
                         json!({
                             "status": "failed",
-                            "error": "failed to focus target window",
+                            "error": error.clone(),
                             "detail": error,
                             "target_app": target_app,
                             "target_windows": tried
@@ -806,10 +806,11 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         return (body, status);
     }
 
-    let child = Command::new(replay_python_command())
+    let mut command = Command::new(replay_python_command());
+    command
         .current_dir(marouba_root_dir())
-        .args(["scripts/replay.py", "--workflow", &name, "--params", "{}"])
-        .spawn();
+        .args(["scripts/replay.py", "--workflow", &name, "--params", "{}"]);
+    let child = no_window_command(&mut command).spawn();
     match child {
         Ok(child) => (json!({"status": "started", "pid": child.id()}), 200),
         Err(error) => (
@@ -848,6 +849,59 @@ fn is_known_creative_window(title: &str) -> bool {
     ["paint", "photoshop", "ableton", "blender", "comfyui", "chrome", "edge"]
         .iter()
         .any(|needle| lower.contains(needle))
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
+    if let Ok(window_title) = focus_first_available_window(candidates) {
+        return Ok(window_title);
+    }
+    let app = launchable_app_for_targets(candidates)
+        .ok_or_else(|| format!("Could not launch the target app. Please open it manually."))?;
+    launch_app(&app)?;
+    for _ in 0..6 {
+        thread::sleep(Duration::from_millis(500));
+        if let Ok(window_title) = focus_first_available_window(candidates) {
+            return Ok(window_title);
+        }
+    }
+    Err(format!("Could not launch {}. Please open it manually.", app.display_name))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
+    focus_first_available_window(candidates)
+}
+
+#[cfg(target_os = "windows")]
+struct LaunchableApp {
+    display_name: &'static str,
+    executable: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+fn launchable_app_for_targets(candidates: &[String]) -> Option<LaunchableApp> {
+    candidates.iter().find_map(|candidate| {
+        let lower = candidate.to_ascii_lowercase();
+        if lower.contains("paint") {
+            Some(LaunchableApp {
+                display_name: "Paint",
+                executable: "mspaint.exe",
+            })
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn launch_app(app: &LaunchableApp) -> Result<(), String> {
+    shell_execute(app.executable).map_err(|error| {
+        format!(
+            "Could not launch {}. Please open it manually. ({error})",
+            app.display_name
+        )
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1035,8 +1089,9 @@ fn replay_python_command() -> &'static str {
 }
 
 fn command_exists(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
+    let mut command = Command::new(command);
+    command.arg("--version");
+    no_window_command(&mut command)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -1071,14 +1126,14 @@ fn safe_workflow_name(value: &str) -> Result<String, String> {
 }
 
 fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "(Get-Item -LiteralPath $args[0]).LastWriteTime.ToString('yyyy-MM-dd HH:mm')",
-            &path.display().to_string(),
-        ])
-        .output();
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-Command",
+        "(Get-Item -LiteralPath $args[0]).LastWriteTime.ToString('yyyy-MM-dd HH:mm')",
+        &path.display().to_string(),
+    ]);
+    let output = no_window_command(&mut command).output();
     if let Ok(output) = output {
         if output.status.success() {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1513,8 +1568,9 @@ fn open_vault_folder() -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("explorer.exe")
-            .arg(path)
+        let mut command = Command::new("explorer.exe");
+        command.arg(path);
+        no_window_command(&mut command)
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -1523,8 +1579,13 @@ fn open_vault_folder() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_folder_with_shell_execute(path: &PathBuf) -> Result<(), String> {
+    shell_execute(&path.to_string_lossy())
+}
+
+#[cfg(target_os = "windows")]
+fn shell_execute(file: &str) -> Result<(), String> {
     let operation: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-    let file: Vec<u16> = path.to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    let file: Vec<u16> = file.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let result = ShellExecuteW(
             HWND(std::ptr::null_mut()),
@@ -1540,6 +1601,15 @@ fn open_folder_with_shell_execute(path: &PathBuf) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn no_window_command(command: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
 }
 
 #[derive(Clone, Debug)]
@@ -1568,21 +1638,20 @@ fn call_claude_summary(name: &str, events: &[RecordedEvent]) -> Option<WorkflowM
     });
     let temp = token_path().with_file_name("claude-summary-request.json");
     std::fs::write(&temp, serde_json::to_vec(&request_body).ok()?).ok()?;
-    let output = Command::new("curl.exe")
-        .args([
-            "-sS",
-            "https://api.anthropic.com/v1/messages",
-            "-H",
-            &format!("x-api-key: {api_key}"),
-            "-H",
-            "anthropic-version: 2023-06-01",
-            "-H",
-            "content-type: application/json",
-            "--data-binary",
-            &format!("@{}", temp.display()),
-        ])
-        .output()
-        .ok()?;
+    let mut command = Command::new("curl.exe");
+    command.args([
+        "-sS",
+        "https://api.anthropic.com/v1/messages",
+        "-H",
+        &format!("x-api-key: {api_key}"),
+        "-H",
+        "anthropic-version: 2023-06-01",
+        "-H",
+        "content-type: application/json",
+        "--data-binary",
+        &format!("@{}", temp.display()),
+    ]);
+    let output = no_window_command(&mut command).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1702,9 +1771,9 @@ fn slugify(value: &str) -> String {
 }
 
 fn current_date_string() -> String {
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", "Get-Date -Format yyyy-MM-dd"])
-        .output();
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-Command", "Get-Date -Format yyyy-MM-dd"]);
+    let output = no_window_command(&mut command).output();
     if let Ok(output) = output {
         if output.status.success() {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
