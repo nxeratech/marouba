@@ -678,7 +678,21 @@ fn token_path() -> PathBuf {
 }
 
 fn vault_workflows_dir() -> PathBuf {
-    PathBuf::from(r"C:\Share\Marouba\vault\workflows")
+    vault_dir().join("workflows")
+}
+
+fn vault_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("MAROUBA_VAULT_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("vault")
 }
 
 fn marouba_root_dir() -> PathBuf {
@@ -734,6 +748,14 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
     };
 
+    if let Some(events) = parse_gesture_workflow(&name) {
+        let (body, status) = replay_mouse(MouseReplayRequest {
+            target_window: events.iter().find_map(|event| event.window_title.clone()),
+            events,
+        });
+        return (body, status);
+    }
+
     let child = Command::new(replay_python_command())
         .current_dir(marouba_root_dir())
         .args(["scripts/replay.py", "--workflow", &name, "--params", "{}"])
@@ -745,6 +767,70 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
             500,
         ),
     }
+}
+
+fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
+    let path = vault_workflows_dir().join(format!("{name}.md"));
+    let content = std::fs::read_to_string(path).ok()?;
+    let frontmatter = frontmatter_block(&content)?;
+    let routes_text = yaml_field_block(frontmatter, "routes")?;
+    let routes: Value = serde_json::from_str(&routes_text).ok()?;
+    for route in routes.as_array()? {
+        if route.get("type").and_then(Value::as_str) == Some("gesture") {
+            let events = route.get("events")?.clone();
+            return serde_json::from_value(events).ok();
+        }
+    }
+    None
+}
+
+fn frontmatter_block(content: &str) -> Option<&str> {
+    let mut parts = content.splitn(3, "---");
+    if !parts.next()?.trim().is_empty() {
+        return None;
+    }
+    parts.next()
+}
+
+fn yaml_field_block(frontmatter: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in frontmatter.lines() {
+        if collecting {
+            if is_top_level_yaml_field(line) {
+                break;
+            }
+            lines.push(line.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            collecting = true;
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                lines.push(rest.to_string());
+            }
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn is_top_level_yaml_field(line: &str) -> bool {
+    if line.is_empty() || line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    line.split_once(':')
+        .map(|(key, _)| {
+            !key.is_empty()
+                && key
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        })
+        .unwrap_or(false)
 }
 
 fn replay_python_command() -> &'static str {
