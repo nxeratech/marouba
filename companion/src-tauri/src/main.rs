@@ -249,7 +249,9 @@ fn save_workflow(
         .events
         .iter()
         .enumerate()
-        .filter_map(|(index, event)| keep.contains(&index).then(|| event.clone()))
+        .filter_map(|(index, event)| {
+            (keep.contains(&index) && !is_marouba_event(event)).then(|| event.clone())
+        })
         .collect();
     drop(guard);
 
@@ -262,7 +264,6 @@ fn save_workflow(
     push_log(&mut guard, format!("Saved {}", path.display()));
     Ok(path.display().to_string())
 }
-
 #[tauri::command]
 fn open_vault() -> Result<(), String> {
     open_vault_folder()
@@ -290,11 +291,16 @@ fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String>
 fn stop_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
     guard.recording = false;
+    let before_count = guard.events.len();
+    guard.events.retain(|event| !is_marouba_event(event));
     let event_count = guard.events.len();
+    let removed_count = before_count.saturating_sub(event_count);
+    if removed_count > 0 {
+        push_log(&mut guard, format!("Filtered {removed_count} Marouba control steps"));
+    }
     push_log(&mut guard, format!("Recording stopped: {event_count} steps"));
     Ok(())
 }
-
 fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
     match state.lock() {
         Ok(guard) => RecordingStatus {
@@ -319,6 +325,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let mut last_right = false;
     let mut last_keys = HashSet::<i32>::new();
     let mut last_title = String::new();
+    let mut current_app_name = String::new();
 
     loop {
         let recording = state.lock().map(|guard| guard.recording).unwrap_or(false);
@@ -334,6 +341,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
 
         if window.title != last_title {
             last_title = window.title.clone();
+            current_app_name = app_name_from_title(&window.title);
             push_event(
                 &state,
                 RecordedEvent {
@@ -346,18 +354,31 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     button: None,
                     key: None,
                     window_title: Some(window.title.clone()),
-                    app_name: Some(window.app_name.clone()),
+                    app_name: Some(current_app_name.clone()),
                     window_rect: active_window_rect(),
                     element_name: None,
                     element_role: None,
                 },
             );
+        } else if current_app_name.is_empty() || current_app_name == "unknown" {
+            current_app_name = app_name_from_title(&window.title);
         }
 
         if let Some((x, y)) = cursor_position() {
             if last_pos != Some((x, y)) {
                 last_pos = Some((x, y));
-                push_event(&state, mouse_event_record("mousemove", x, y, None, started.elapsed().as_millis()));
+                push_event(
+                    &state,
+                    mouse_event_record(
+                        "mousemove",
+                        x,
+                        y,
+                        None,
+                        started.elapsed().as_millis(),
+                        &window,
+                        &current_app_name,
+                    ),
+                );
             }
 
             let left = key_is_down(VK_LBUTTON.0 as i32);
@@ -371,6 +392,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                         y,
                         Some("left".to_string()),
                         started.elapsed().as_millis(),
+                        &window,
+                        &current_app_name,
                     ),
                 );
             }
@@ -386,6 +409,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                         y,
                         Some("right".to_string()),
                         started.elapsed().as_millis(),
+                        &window,
+                        &current_app_name,
                     ),
                 );
             }
@@ -408,7 +433,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                             button: None,
                             key: Some(vk.to_string()),
                             window_title: Some(window.title.clone()),
-                            app_name: Some(window.app_name.clone()),
+                            app_name: Some(current_app_name.clone()),
                             window_rect: active_window_rect(),
                             element_name: None,
                             element_role: None,
@@ -430,7 +455,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     button: None,
                     key: Some(vk.to_string()),
                     window_title: Some(window.title.clone()),
-                    app_name: Some(window.app_name.clone()),
+                    app_name: Some(current_app_name.clone()),
                     window_rect: active_window_rect(),
                     element_name: None,
                     element_role: None,
@@ -441,7 +466,6 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
         thread::sleep(Duration::from_millis(45));
     }
 }
-
 fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
     if let Ok(mut guard) = state.lock() {
         if !guard.recording {
@@ -468,8 +492,15 @@ fn event_label(event: &RecordedEvent) -> String {
     }
 }
 
-fn mouse_event_record(kind: &str, x: i32, y: i32, button: Option<String>, timestamp_ms: u128) -> RecordedEvent {
-    let window = active_window();
+fn mouse_event_record(
+    kind: &str,
+    x: i32,
+    y: i32,
+    button: Option<String>,
+    timestamp_ms: u128,
+    window: &WindowInfo,
+    current_app_name: &str,
+) -> RecordedEvent {
     let rect = active_window_rect();
     let (normalized_x, normalized_y) = match rect.as_ref() {
         Some(rect) if rect.width > 0 && rect.height > 0 => (
@@ -487,8 +518,8 @@ fn mouse_event_record(kind: &str, x: i32, y: i32, button: Option<String>, timest
         normalized_y,
         button,
         key: None,
-        window_title: Some(window.title),
-        app_name: Some(window.app_name),
+        window_title: Some(window.title.clone()),
+        app_name: Some(current_app_name.to_string()),
         window_rect: rect,
         element_name: None,
         element_role: None,
@@ -514,7 +545,6 @@ fn mouse_event_record(kind: &str, x: i32, y: i32, button: Option<String>, timest
     }
     event
 }
-
 fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
     let server = Server::http("127.0.0.1:7842").expect("failed to bind companion API");
     for mut request in server.incoming_requests() {
@@ -872,12 +902,50 @@ fn element_json(_: &(), _: &str, _: &UiaRequest) -> Value {
 }
 
 fn active_window() -> WindowInfo {
+    let title = active_window_title();
     WindowInfo {
-        title: active_window_title(),
-        app_name: "unknown".to_string(),
+        app_name: app_name_from_title(&title),
+        title,
     }
 }
 
+fn app_name_from_title(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("paint") {
+        "MS Paint".to_string()
+    } else if lower.contains("notepad") {
+        "Notepad".to_string()
+    } else if lower.contains("photoshop") {
+        "Photoshop".to_string()
+    } else if lower.contains("ableton") {
+        "Ableton Live".to_string()
+    } else if lower.contains("blender") {
+        "Blender".to_string()
+    } else if lower.contains("chrome") {
+        "Chrome".to_string()
+    } else if lower.contains("edge") {
+        "Microsoft Edge".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_marouba_event(event: &RecordedEvent) -> bool {
+    event
+        .window_title
+        .as_deref()
+        .map(|title| title.trim().eq_ignore_ascii_case("Marouba"))
+        .unwrap_or(false)
+        || event
+            .app_name
+            .as_deref()
+            .map(|name| name.trim().eq_ignore_ascii_case("Marouba"))
+            .unwrap_or(false)
+}
 #[cfg(target_os = "windows")]
 fn active_window_title() -> String {
     unsafe {
