@@ -36,6 +36,11 @@ def test_all_profile_workflows_are_valid_vault_format() -> None:
             assert workflow["id"]
             assert workflow["name"]
             assert workflow["app"]
+            assert workflow["description"]
+            assert "params" in workflow
+            assert workflow["tags"]
+            assert workflow["author"]
+            assert workflow["created"]
             assert workflow["routes"]
             assert workflow["fallback_order"]
             assert workflow["verification"]

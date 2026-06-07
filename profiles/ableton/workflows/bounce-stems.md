@@ -5,6 +5,14 @@ app: Ableton Live
 app_version: latest
 author: nxeratech
 category: audio-export
+description: Export selected tracks or all tracks from Ableton Live as individual stem files.
+params:
+  - name: set_path
+    type: string
+    required: true
+  - name: output_folder
+    type: string
+    required: true
 tags: [ableton, stems, export, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

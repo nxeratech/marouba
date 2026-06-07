@@ -5,6 +5,20 @@ app: Browser
 app_version: Chrome/Edge latest
 author: nxeratech
 category: web-automation
+description: Fill a browser form and submit it through DevTools, CLI automation, or desktop fallbacks.
+params:
+  - name: url
+    type: string
+    required: true
+  - name: fields_json
+    type: string
+    required: true
+  - name: submit_selector
+    type: string
+    required: true
+  - name: success_url_fragment
+    type: string
+    required: true
 tags: [browser, form, submit, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

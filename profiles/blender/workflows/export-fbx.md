@@ -5,6 +5,14 @@ app: Blender
 app_version: latest
 author: nxeratech
 category: 3d-export
+description: Export the active Blender scene or selected objects to FBX.
+params:
+  - name: blend_path
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
 tags: [blender, fbx, export, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

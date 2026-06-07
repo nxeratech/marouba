@@ -5,6 +5,17 @@ app: ComfyUI
 app_version: latest
 author: nxeratech
 category: image-generation
+description: Load a source image into a ComfyUI img2img graph, queue it, and verify the generated output.
+params:
+  - name: input_path
+    type: string
+    required: true
+  - name: prompt
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
 tags: [comfyui, img2img, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

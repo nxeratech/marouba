@@ -5,6 +5,20 @@ app: Browser
 app_version: Chrome/Edge latest
 author: nxeratech
 category: web-automation
+description: Capture a screenshot of a browser page through DevTools, headless CLI, or desktop fallbacks.
+params:
+  - name: url
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
+  - name: width
+    type: integer
+    required: true
+  - name: height
+    type: integer
+    required: true
 tags: [browser, screenshot, chrome, edge, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

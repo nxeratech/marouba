@@ -5,6 +5,14 @@ app: Ableton Live
 app_version: latest
 author: nxeratech
 category: audio-export
+description: Export the Ableton Live master mix to a single audio file.
+params:
+  - name: set_path
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
 tags: [ableton, master, wav, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

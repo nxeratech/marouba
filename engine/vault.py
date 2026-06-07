@@ -54,6 +54,23 @@ class Vault:
             workflows.append(self.load_workflow(path))
         return workflows
 
+    def list_vaults(self) -> list[dict[str, Any]]:
+        workflows = []
+        for path in sorted(self.workflows_dir.rglob("*.md")):
+            workflow = self.load_workflow(path)
+            workflows.append(
+                {
+                    "id": workflow.get("id") or path.stem,
+                    "name": workflow.get("name") or path.stem,
+                    "app": workflow.get("app"),
+                    "description": workflow.get("description", ""),
+                    "params": workflow.get("params", []),
+                    "tags": workflow.get("tags", []),
+                    "path": str(path),
+                }
+            )
+        return workflows
+
     def find_workflow(self, workflow_id_or_name: str) -> dict[str, Any] | None:
         needle = workflow_id_or_name.casefold()
         for workflow in self.list_workflows():

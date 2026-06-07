@@ -5,6 +5,17 @@ app: Photoshop
 app_version: latest
 author: nxeratech
 category: image-processing
+description: Resize a folder of images to a target width and save the results to an output folder.
+params:
+  - name: input_folder
+    type: string
+    required: true
+  - name: output_folder
+    type: string
+    required: true
+  - name: width
+    type: integer
+    required: true
 tags: [photoshop, batch, resize, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

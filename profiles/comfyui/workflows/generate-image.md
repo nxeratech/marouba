@@ -5,6 +5,14 @@ app: ComfyUI
 app_version: latest
 author: nxeratech
 category: image-generation
+description: Queue a ComfyUI text-to-image graph and verify the requested output image exists.
+params:
+  - name: prompt
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
 tags: [comfyui, text-to-image, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

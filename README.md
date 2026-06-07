@@ -69,6 +69,26 @@ npm run build
 
 The Mac companion lives in `companion-mac/` and exposes the same HTTP API. It uses a PyObjC/Cocoa accessibility sidecar bridge and the `macos_uia` route type while preserving the same vault format.
 
+## MCP Server
+
+Marouba includes a stdio Model Context Protocol server for agents that need to list, inspect, or replay vault workflows.
+
+```json
+{
+  "mcpServers": {
+    "marouba": {
+      "command": "python",
+      "args": ["C:\\Share\\Marouba\\mcp\\server.py"],
+      "env": {
+        "MAROUBA_VAULT_PATH": "C:\\Share\\Marouba\\vault"
+      }
+    }
+  }
+}
+```
+
+The server registers `list_workflows`, `read_workflow`, and `replay_workflow`. See [mcp/README.md](mcp/README.md) for Claude Desktop and Cursor setup.
+
 ## Contributing
 
 Contributions are welcome, especially high-quality app profiles. Start with [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md), copy an existing profile, add at least two tested workflows, and open a pull request.

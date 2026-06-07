@@ -12,6 +12,17 @@ The Marouba vault is a directory of human-readable Markdown files. Each workflow
 id: browser-screenshot-page
 name: Browser Screenshot Page
 app: Browser
+description: Capture a screenshot of a browser page.
+params:
+  - name: url
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
+tags: [browser, screenshot]
+author: nxeratech
+created: 2026-06-06
 routes: []
 fallback_order: [api, cli, uia, shortcut, visual, ask]
 verification:
@@ -26,11 +37,18 @@ depends_on: []
 
 ## Required Frontmatter Fields
 
+Every workflow must begin with a YAML frontmatter block delimited by `---`.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `id` | string | Stable workflow id. Use lowercase kebab-case. |
 | `name` | string | Human-readable workflow name. |
 | `app` | string | App or environment this workflow targets. |
+| `description` | string | One-sentence summary shown to agents, users, and marketplace listings. |
+| `params` | list[object] | Input parameters accepted by the workflow. Each item should include `name`, `type`, and `required`. Empty list allowed only for workflows with no inputs. |
+| `tags` | list[string] | Search and marketplace tags. |
+| `author` | string | Creator or organization. |
+| `created` | date string | Creation date, ISO `YYYY-MM-DD`. |
 | `routes` | list | Ordered route definitions available to execute the workflow. |
 | `fallback_order` | list[string] | Route types to try, cheapest first. Must end with `ask`. |
 | `verification` | object | Completion check. |
@@ -42,10 +60,7 @@ depends_on: []
 | Field | Type | Description |
 | --- | --- | --- |
 | `app_version` | string | Tested app version or `latest`. |
-| `author` | string | Creator or organization. |
 | `category` | string | Workflow category. |
-| `tags` | list[string] | Search and marketplace tags. |
-| `created` | date string | Creation date, ISO `YYYY-MM-DD`. |
 | `last_verified` | date string | Last date this workflow was verified. |
 | `notes` | string | Short machine-readable note. |
 | `license` | string | Workflow/profile-specific license if different from project. |

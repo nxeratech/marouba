@@ -5,6 +5,17 @@ app: Blender
 app_version: latest
 author: nxeratech
 category: 3d-render
+description: Render a single still frame from a Blender file.
+params:
+  - name: blend_path
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
+  - name: frame
+    type: integer
+    required: true
 tags: [blender, render, still, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06

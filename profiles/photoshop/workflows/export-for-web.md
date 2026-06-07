@@ -5,6 +5,17 @@ app: Photoshop
 app_version: latest
 author: nxeratech
 category: image-export
+description: Export a Photoshop document to a web-ready image using JSX first, then UI fallbacks.
+params:
+  - name: input_path
+    type: string
+    required: true
+  - name: output_path
+    type: string
+    required: true
+  - name: format
+    type: string
+    required: true
 tags: [photoshop, export, web, marketplace-seed]
 last_verified: 2026-06-06
 created: 2026-06-06
