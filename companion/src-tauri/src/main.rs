@@ -752,23 +752,31 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
     };
 
     if let Some(events) = parse_gesture_workflow(&name) {
-        let target_window = parse_workflow_app_name(&name)
-            .or_else(|| events.iter().find_map(|event| event.window_title.clone()));
-        if let Some(window_title) = target_window.as_deref() {
-            if let Err(error) = focus_target_window(window_title) {
-                return (
-                    json!({
-                        "status": "failed",
-                        "error": format!("failed to focus target window '{window_title}': {error}"),
-                        "target_window": window_title
-                    }),
-                    404,
-                );
+        let target_windows = replay_target_windows(&name, &events);
+        let focused_window = if target_windows.is_empty() {
+            None
+        } else {
+            match focus_first_available_window(&target_windows) {
+                Ok(window_title) => Some(window_title),
+                Err(error) => {
+                    let tried = target_windows.join(", ");
+                    return (
+                        json!({
+                            "status": "failed",
+                            "error": format!("failed to focus target window: {error}"),
+                            "target_windows": tried
+                        }),
+                        404,
+                    );
+                }
             }
+        };
+        if let Some(window_title) = focused_window.as_deref() {
+            println!("[Marouba] Focused replay target window: {window_title}");
         }
         thread::sleep(Duration::from_millis(500));
-        let (body, status) = replay_mouse(MouseReplayRequest {
-            target_window: target_window.clone(),
+        let (mut body, status) = replay_mouse(MouseReplayRequest {
+            target_window: focused_window.clone(),
             events,
         });
         if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -780,10 +788,14 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
                         .and_then(Value::as_str)
                         .unwrap_or("gesture replay failed"),
                     "detail": body,
-                    "target_window": target_window
+                    "target_window": focused_window
                 }),
                 status,
             );
+        }
+        if let Value::Object(ref mut object) = body {
+            object.insert("status".to_string(), json!("ok"));
+            object.insert("focused_window".to_string(), json!(focused_window));
         }
         return (body, status);
     }
@@ -799,6 +811,57 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
             500,
         ),
     }
+}
+
+fn replay_target_windows(name: &str, events: &[RecordedEvent]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(app_name) = parse_workflow_app_name(name) {
+        push_unique_window(&mut candidates, app_name);
+    }
+    for event in events {
+        if let Some(title) = event.window_title.as_ref() {
+            push_unique_window(&mut candidates, title.clone());
+        }
+    }
+    candidates.sort_by_key(|title| if is_known_creative_window(title) { 0 } else { 1 });
+    candidates
+}
+
+fn push_unique_window(candidates: &mut Vec<String>, title: String) {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !candidates.iter().any(|candidate| candidate.eq_ignore_ascii_case(trimmed)) {
+        candidates.push(trimmed.to_string());
+    }
+}
+
+fn is_known_creative_window(title: &str) -> bool {
+    let lower = title.to_ascii_lowercase();
+    ["paint", "photoshop", "ableton", "blender", "comfyui", "chrome", "edge"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+#[cfg(target_os = "windows")]
+fn focus_first_available_window(candidates: &[String]) -> Result<String, String> {
+    let mut errors = Vec::new();
+    for title in candidates {
+        match focus_target_window(title) {
+            Ok(()) => return Ok(title.clone()),
+            Err(error) => errors.push(format!("{title}: {error}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn focus_first_available_window(candidates: &[String]) -> Result<String, String> {
+    Err(format!(
+        "window focus is not implemented on this platform; tried {}",
+        candidates.join(", ")
+    ))
 }
 
 fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {

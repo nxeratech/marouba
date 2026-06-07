@@ -134,9 +134,29 @@ li {
   margin: 5px 0;
 }
 
-.workflows-panel {
+.vault-drawer {
+  background: rgba(5, 8, 14, 0.72);
+  border: 1px solid #2b3446;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.vault-drawer[hidden] {
+  display: none;
+}
+
+.vault-card {
+  background: #141924;
+  border: 1px solid #232b3b;
+  border-radius: 8px;
   display: grid;
   gap: 8px;
+  padding: 10px;
+}
+
+.vault-tools {
+  display: flex;
+  gap: 6px;
 }
 
 .workflow-list {
@@ -148,8 +168,8 @@ li {
 
 .workflow-row {
   align-items: start;
-  background: #0f141f;
-  border: 1px solid #232b3b;
+  background: #151c2a;
+  border: 1px solid #354156;
   border-radius: 6px;
   color: #dbe5f3;
   display: grid;
@@ -158,6 +178,11 @@ li {
   min-height: 0;
   padding: 8px;
   text-align: left;
+}
+
+.workflow-row:hover {
+  background: #1b2535;
+  border-color: #50607a;
 }
 
 .workflow-row.selected {

@@ -32,6 +32,8 @@ const actions = document.querySelector<HTMLOListElement>("#actions")!;
 const workflowList = document.querySelector<HTMLDivElement>("#workflow-list")!;
 const workflowActions = document.querySelector<HTMLElement>("#workflow-actions")!;
 const refreshWorkflowsButton = document.querySelector<HTMLButtonElement>("#refresh-workflows")!;
+const vaultDrawer = document.querySelector<HTMLElement>("#vault-drawer")!;
+const closeVaultButton = document.querySelector<HTMLButtonElement>("#close-vault")!;
 const replayWorkflowButton = document.querySelector<HTMLButtonElement>("#replay-workflow")!;
 const deleteWorkflowButton = document.querySelector<HTMLButtonElement>("#delete-workflow")!;
 const replayStatus = document.querySelector<HTMLParagraphElement>("#replay-status")!;
@@ -63,7 +65,12 @@ stopButton.addEventListener("click", async () => {
 });
 
 document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("click", async () => {
-  await invoke("open_vault");
+  vaultDrawer.hidden = false;
+  await loadWorkflows();
+});
+
+closeVaultButton.addEventListener("click", () => {
+  vaultDrawer.hidden = true;
 });
 
 refreshWorkflowsButton.addEventListener("click", async () => {
@@ -78,13 +85,19 @@ replayWorkflowButton.addEventListener("click", async () => {
   replayStatus.className = "running";
   replayStatus.textContent = "Replay running...";
   try {
-    const result = await companionFetch<{ status: string; pid?: number; error?: string }>("/replay", {
+    const result = await companionFetch<{ status?: string; ok?: boolean; pid?: number; error?: string; focused_window?: string }>("/replay", {
       method: "POST",
       body: JSON.stringify({ name: selectedWorkflow.name }),
     });
-    replayStatus.className = result.status === "started" ? "completed" : "failed";
-    replayStatus.textContent =
-      result.status === "started" ? `Replay started${result.pid ? ` (pid ${result.pid})` : ""}` : result.error ?? "Replay failed";
+    const succeeded = result.status === "started" || result.status === "ok" || result.ok === true;
+    replayStatus.className = succeeded ? "completed" : "failed";
+    if (succeeded) {
+      const pid = result.pid ? ` (pid ${result.pid})` : "";
+      const focused = result.focused_window ? ` - focused ${result.focused_window}` : "";
+      replayStatus.textContent = `Replay started${pid}${focused}`;
+    } else {
+      replayStatus.textContent = result.error ?? "Replay failed";
+    }
   } catch (error) {
     replayStatus.className = "failed";
     replayStatus.textContent = String(error);
