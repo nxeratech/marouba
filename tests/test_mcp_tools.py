@@ -79,6 +79,7 @@ def test_mcp_replay_workflow_uses_existing_replay_logic(tmp_path: Path, monkeypa
     tools = load_mcp_tools()
     result = tools.replay_workflow("mcp-test-workflow", params={}, no_repair=True)
 
+    print("DEBUG result:", result)
     assert result["success"] is True
     assert result["exit_code"] == 0
     assert "Loading workflow: mcp-test-workflow" in result["stdout"]

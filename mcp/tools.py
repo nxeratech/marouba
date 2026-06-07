@@ -73,21 +73,49 @@ def replay_workflow(
     params = params or {}
     stdout = io.StringIO()
     stderr = io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), silence_process_stdio():
-        exit_code = run_replay_workflow(
-            workflow_id,
-            params,
-            root=configured_root(),
-            no_repair=no_repair,
-            router=Router({"cli": mcp_cli_available}),
-            executor=Executor(configured_root()),
-        )
+    root = configured_root()
+    vault_path = configured_vault_path()
+    workflow_paths = sorted(str(path) for path in (vault_path / "workflows").rglob("*.md"))
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), silence_process_stdio():
+            exit_code = run_replay_workflow(
+                workflow_id,
+                params,
+                root=root,
+                no_repair=no_repair,
+                router=Router({"cli": mcp_cli_available}),
+                executor=Executor(root),
+            )
+    except Exception as exc:
+        return {
+            "success": False,
+            "exit_code": 1,
+            "error": repr(exc),
+            "steps": [],
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "root": str(root),
+            "vault_path": str(vault_path),
+            "workflow_paths": workflow_paths,
+        }
+
+    output = stdout.getvalue()
+    error_output = stderr.getvalue()
+    steps = extract_replay_steps(output)
+    error = ""
+    if exit_code != 0:
+        error = error_output.strip() or last_replay_error(output) or f"Replay exited with code {exit_code}"
 
     return {
         "success": exit_code == 0,
         "exit_code": exit_code,
-        "stdout": stdout.getvalue(),
-        "stderr": stderr.getvalue(),
+        "error": error,
+        "steps": steps,
+        "stdout": output,
+        "stderr": error_output,
+        "root": str(root),
+        "vault_path": str(vault_path),
+        "workflow_paths": workflow_paths,
     }
 
 
@@ -109,6 +137,31 @@ def first_command_token(command: str) -> str:
     if not match:
         return ""
     return next(group for group in match.groups() if group)
+
+
+def extract_replay_steps(output: str) -> list[str]:
+    steps = []
+    for line in output.splitlines():
+        if line.startswith("[Marouba] Route order:"):
+            steps.append(line)
+        elif line.startswith("[Marouba] Trying route:"):
+            steps.append(line)
+        elif line.startswith("[Marouba] Step "):
+            steps.append(line)
+        elif line.startswith("[Marouba] Route failed:"):
+            steps.append(line)
+        elif line.startswith("[Marouba] Step failed:"):
+            steps.append(line)
+        elif line.startswith("[Marouba] All routes failed."):
+            steps.append(line)
+    return steps
+
+
+def last_replay_error(output: str) -> str:
+    for line in reversed(output.splitlines()):
+        if "failed" in line.casefold() or "not found" in line.casefold():
+            return line
+    return ""
 
 
 @contextlib.contextmanager
