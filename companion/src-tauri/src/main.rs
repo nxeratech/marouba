@@ -31,7 +31,7 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, GetAsyncKeyState, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    mouse_event, BlockInput, GetAsyncKeyState, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VK_LBUTTON, VK_RBUTTON,
 };
 #[cfg(target_os = "windows")]
@@ -645,6 +645,10 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
                 let (body, status) = delete_saved_workflow(payload);
                 json_response(body, status)
             }
+            (Method::Post, "/open-vault") => match open_vault_folder() {
+                Ok(()) => json_response(json!({"status": "opened"}), 200),
+                Err(error) => json_response(json!({"status": "failed", "error": error}), 500),
+            },
             (Method::Post, "/screenshot") => {
                 let payload: ScreenshotRequest = read_json(&mut request);
                 json_response(screenshot(payload), 200)
@@ -1212,6 +1216,7 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
+    let _input_guard = InputBlockGuard::new();
     let replay_rect = active_window_rect();
     let mut replayed = 0usize;
     for event in payload.events.iter().filter(|event| {
@@ -1578,8 +1583,41 @@ fn open_vault_folder() -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+struct InputBlockGuard {
+    blocked: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl InputBlockGuard {
+    fn new() -> Self {
+        let blocked = unsafe { BlockInput(BOOL(1)).is_ok() };
+        Self { blocked }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for InputBlockGuard {
+    fn drop(&mut self) {
+        if self.blocked {
+            let _ = unsafe { BlockInput(BOOL(0)) };
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn open_folder_with_shell_execute(path: &PathBuf) -> Result<(), String> {
-    shell_execute(&path.to_string_lossy())
+    shell_execute(&path.to_string_lossy()).or_else(|shell_error| {
+        let mut command = Command::new("explorer.exe");
+        command.arg(path);
+        no_window_command(&mut command)
+            .spawn()
+            .map(|_| ())
+            .map_err(|explorer_error| {
+                format!(
+                    "ShellExecuteW failed ({shell_error}); explorer.exe fallback failed ({explorer_error})"
+                )
+            })
+    })
 }
 
 #[cfg(target_os = "windows")]

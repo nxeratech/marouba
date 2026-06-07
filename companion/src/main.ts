@@ -66,6 +66,13 @@ stopButton.addEventListener("click", async () => {
 
 document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("click", async () => {
   vaultDrawer.hidden = false;
+  try {
+    await companionFetch<{ status: string }>("/open-vault", { method: "POST" });
+  } catch (error) {
+    replayStatus.hidden = false;
+    replayStatus.className = "failed";
+    replayStatus.textContent = `Unable to open vault folder: ${String(error)}`;
+  }
   await loadWorkflows();
 });
 
@@ -341,5 +348,5 @@ function describeStep(step: RecordedEvent, index: number) {
 }
 
 refresh();
-loadWorkflows();
+vaultDrawer.hidden = true;
 setInterval(refresh, 1500);
