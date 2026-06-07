@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -165,7 +167,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&record, &stop, &vault, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
-        .tooltip("Marouba Companion")
+        .tooltip("Marouba")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -198,7 +200,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         });
 
-    builder = builder.icon(Image::new(include_bytes!("../icons/icon_rgba.bin"), 32, 32));
+    builder = builder.icon(Image::new(include_bytes!("../icons/tray_icon_rgba.bin"), 32, 32));
     let _tray = builder.build(app)?;
     Ok(())
 }

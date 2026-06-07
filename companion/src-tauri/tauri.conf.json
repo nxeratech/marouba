@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Marouba Companion",
+  "productName": "Marouba",
   "version": "0.3.0",
   "identifier": "com.nxeratech.marouba.companion",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Marouba Companion",
+        "title": "Marouba",
         "width": 390,
         "height": 560,
         "visible": false
