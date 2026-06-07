@@ -135,6 +135,27 @@ li {
   padding: 0 10px;
 }
 
+#workflow-name.invalid {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.14);
+}
+
+#workflow-name.shake {
+  animation: shake 160ms ease-in-out 0s 2;
+}
+
+#name-hint {
+  color: #f87171;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  margin: -2px 0 0;
+}
+
+#name-hint[hidden] {
+  display: none;
+}
+
 #steps {
   display: grid;
   gap: 6px;
@@ -166,9 +187,10 @@ li {
   background: #8d43ce;
 }
 
+#save[aria-disabled="true"],
 #save:disabled {
-  background: #3d2a51;
-  color: #b9a6cf;
+  background: #4b5563;
+  color: #cbd5e1;
   opacity: 1;
 }
 
@@ -176,4 +198,19 @@ li {
   color: #a7b4c8;
   font-size: 12px;
   line-height: 1.35;
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  25% {
+    transform: translateX(-4px);
+  }
+
+  75% {
+    transform: translateX(4px);
+  }
 }

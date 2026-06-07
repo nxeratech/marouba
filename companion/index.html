@@ -25,9 +25,10 @@
       </section>
       <section id="review" class="panel" hidden>
         <h2>Review capture</h2>
-        <input id="workflow-name" placeholder="Workflow name" />
+        <input id="workflow-name" placeholder="Workflow name *" required />
+        <p id="name-hint" hidden>Please enter a workflow name</p>
         <div id="steps"></div>
-        <button id="save">Save Workflow</button>
+        <button id="save" aria-disabled="true">Save Workflow</button>
       </section>
       <p id="message"></p>
     </main>

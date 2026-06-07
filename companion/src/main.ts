@@ -26,11 +26,13 @@ const actions = document.querySelector<HTMLOListElement>("#actions")!;
 const steps = document.querySelector<HTMLDivElement>("#steps")!;
 const review = document.querySelector<HTMLElement>("#review")!;
 const workflowName = document.querySelector<HTMLInputElement>("#workflow-name")!;
+const nameHint = document.querySelector<HTMLParagraphElement>("#name-hint")!;
 const saveButton = document.querySelector<HTMLButtonElement>("#save")!;
 const message = document.querySelector<HTMLParagraphElement>("#message")!;
 const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
 let savedStatus: string | null = null;
+let reviewWasVisible = false;
 
 recordButton.addEventListener("click", async () => {
   savedStatus = null;
@@ -49,11 +51,19 @@ document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("clic
   await invoke("open_vault");
 });
 
+workflowName.addEventListener("input", () => {
+  updateSaveState();
+});
+
 saveButton.addEventListener("click", async () => {
+  if (!workflowName.value.trim()) {
+    showNameRequired();
+    return;
+  }
   const keepIndexes = Array.from(steps.querySelectorAll<HTMLInputElement>("input[data-index]"))
     .filter((input) => input.checked)
     .map((input) => Number(input.dataset.index));
-  const name = workflowName.value.trim() || "Tray Recorded Workflow";
+  const name = workflowName.value.trim();
   saveButton.disabled = true;
   message.textContent = "Saving workflow...";
   try {
@@ -66,7 +76,7 @@ saveButton.addEventListener("click", async () => {
   } catch (error) {
     message.textContent = String(error);
   } finally {
-    saveButton.disabled = false;
+    updateSaveState();
   }
 });
 
@@ -100,7 +110,8 @@ function render(status: RecordingStatus) {
     }),
   );
 
-  review.hidden = status.steps.length === 0 || status.mode === "recording";
+  const reviewVisible = status.steps.length > 0 && status.mode !== "recording";
+  review.hidden = !reviewVisible;
   steps.replaceChildren(
     ...status.steps.map((step, index) => {
       const row = document.createElement("label");
@@ -118,6 +129,31 @@ function render(status: RecordingStatus) {
       return row;
     }),
   );
+  if (reviewVisible && !reviewWasVisible) {
+    workflowName.focus();
+  }
+  reviewWasVisible = reviewVisible;
+  updateSaveState();
+}
+
+function updateSaveState() {
+  const hasName = workflowName.value.trim().length > 0;
+  if (!saveButton.disabled) {
+    saveButton.setAttribute("aria-disabled", hasName ? "false" : "true");
+  }
+  if (hasName) {
+    nameHint.hidden = true;
+    workflowName.classList.remove("invalid");
+  }
+}
+
+function showNameRequired() {
+  nameHint.hidden = false;
+  workflowName.classList.remove("shake");
+  workflowName.classList.add("invalid");
+  void workflowName.offsetWidth;
+  workflowName.classList.add("shake");
+  workflowName.focus();
 }
 
 function describeStep(step: RecordedEvent, index: number) {
