@@ -583,6 +583,10 @@ fn mouse_event_record(
 fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
     let server = Server::http("127.0.0.1:7842").expect("failed to bind companion API");
     for mut request in server.incoming_requests() {
+        if request.method() == &Method::Options {
+            let _ = request.respond(cors_response(json!({}), 204));
+            continue;
+        }
         if !is_authorized(&request, &token) {
             let _ = request.respond(json_response(json!({"error": "unauthorized"}), 401));
             continue;
@@ -803,11 +807,29 @@ fn read_json<T: for<'de> Deserialize<'de>>(request: &mut tiny_http::Request) -> 
 }
 
 fn json_response(value: Value, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
+    cors_response(value, status)
+}
+
+fn cors_response(value: Value, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
-    let header = Header::from_bytes("Content-Type", "application/json").unwrap();
+    let content_type = Header::from_bytes("Content-Type", "application/json").unwrap();
+    let allow_origin = Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap();
+    let allow_methods = Header::from_bytes(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS",
+    )
+    .unwrap();
+    let allow_headers = Header::from_bytes(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type",
+    )
+    .unwrap();
     Response::from_data(body)
         .with_status_code(StatusCode(status))
-        .with_header(header)
+        .with_header(content_type)
+        .with_header(allow_origin)
+        .with_header(allow_methods)
+        .with_header(allow_headers)
 }
 
 fn find_uia(payload: UiaRequest) -> (Value, u16) {

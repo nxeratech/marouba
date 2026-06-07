@@ -179,18 +179,33 @@ async function deleteSelectedWorkflow() {
 
 async function companionFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!apiToken) {
+    console.log("[Marouba] Loading companion bearer token");
     apiToken = await invoke<string>("companion_token");
   }
-  const response = await fetch(`http://localhost:7842${path}`, {
+  const url = `http://localhost:7842${path}`;
+  const request = {
     ...init,
     headers: {
       Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json",
       ...(init.headers ?? {}),
     },
+  };
+  console.log("[Marouba] Companion fetch", { method: request.method ?? "GET", url });
+  let response: Response;
+  try {
+    response = await fetch(url, request);
+  } catch (error) {
+    console.error("[Marouba] Companion fetch failed before response", { url, error });
+    throw error;
+  }
+  const body = await response.json().catch((error) => {
+    console.error("[Marouba] Companion response JSON parse failed", { url, error });
+    return {};
   });
-  const body = await response.json().catch(() => ({}));
+  console.log("[Marouba] Companion response", { url, status: response.status, body });
   if (!response.ok) {
+    console.error("[Marouba] Companion request failed", { url, status: response.status, body });
     throw new Error(body.error ?? `HTTP ${response.status}`);
   }
   return body as T;
