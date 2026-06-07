@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,9 @@ class Executor:
                 )
             if route.get("type") == "api":
                 output = self._execute_api(route, params, workflow)
+                return self._result(True, output=output, started=start, route=route, source=source)
+            if route.get("type") == "cli":
+                output = self._execute_cli(route, params)
                 return self._result(True, output=output, started=start, route=route, source=source)
             if route.get("type") in {"uia", "macos_uia"}:
                 output = self._execute_uia(route, params)
@@ -132,6 +136,19 @@ class Executor:
             return params.get("output_path")
 
         raise RuntimeError("pyautogui or keyboard is required for keyboard routes")
+
+    def _execute_cli(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
+        command = route.get("command")
+        if not command:
+            raise RuntimeError("CLI route requires command")
+        completed = subprocess.run(str(command), shell=True, capture_output=True, text=True)
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or completed.stdout.strip() or f"Command exited with {completed.returncode}"
+            raise RuntimeError(error)
+        wait_seconds = float(route.get("wait_seconds", 0))
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        return params.get("output_path") or completed.stdout.strip() or None
 
     def _execute_visual(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
         coordinates = route.get("coordinates")
