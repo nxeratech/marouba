@@ -78,7 +78,7 @@ def replay_workflow(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replay a Marouba workflow from the vault.")
     parser.add_argument("--workflow", required=True, help="Workflow id or name")
-    parser.add_argument("--params", required=True, help="JSON params for workflow placeholders")
+    parser.add_argument("--params", default="{}", help="JSON params for workflow placeholders")
     parser.add_argument("--no-repair", action="store_true", help="Do not prompt for repair when all routes fail")
     args = parser.parse_args()
 

@@ -736,7 +736,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
 
     let child = Command::new(replay_python_command())
         .current_dir(marouba_root_dir())
-        .args(["scripts/replay.py", "--workflow", &name])
+        .args(["scripts/replay.py", "--workflow", &name, "--params", "{}"])
         .spawn();
     match child {
         Ok(child) => (json!({"status": "started", "pid": child.id()}), 200),
