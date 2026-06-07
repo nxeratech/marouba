@@ -16,6 +16,8 @@ use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
+#[cfg(target_os = "windows")]
 use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -34,7 +36,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, SetCursorPos,
+    FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, SetCursorPos,
+    SetForegroundWindow,
 };
 
 #[derive(Clone, Debug)]
@@ -749,10 +752,39 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
     };
 
     if let Some(events) = parse_gesture_workflow(&name) {
+        let target_window = parse_workflow_app_name(&name)
+            .or_else(|| events.iter().find_map(|event| event.window_title.clone()));
+        if let Some(window_title) = target_window.as_deref() {
+            if let Err(error) = focus_target_window(window_title) {
+                return (
+                    json!({
+                        "status": "failed",
+                        "error": format!("failed to focus target window '{window_title}': {error}"),
+                        "target_window": window_title
+                    }),
+                    404,
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
         let (body, status) = replay_mouse(MouseReplayRequest {
-            target_window: events.iter().find_map(|event| event.window_title.clone()),
+            target_window: target_window.clone(),
             events,
         });
+        if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
+            return (
+                json!({
+                    "status": "failed",
+                    "error": body
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("gesture replay failed"),
+                    "detail": body,
+                    "target_window": target_window
+                }),
+                status,
+            );
+        }
         return (body, status);
     }
 
@@ -770,8 +802,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
 }
 
 fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
-    let path = vault_workflows_dir().join(format!("{name}.md"));
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = workflow_content(name)?;
     let frontmatter = frontmatter_block(&content)?;
     let routes_text = yaml_field_block(frontmatter, "routes")?;
     let routes: Value = serde_json::from_str(&routes_text).ok()?;
@@ -782,6 +813,17 @@ fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
         }
     }
     None
+}
+
+fn parse_workflow_app_name(name: &str) -> Option<String> {
+    let content = workflow_content(name)?;
+    let frontmatter = frontmatter_block(&content)?;
+    yaml_scalar_field(frontmatter, "app")
+}
+
+fn workflow_content(name: &str) -> Option<String> {
+    let path = vault_workflows_dir().join(format!("{name}.md"));
+    std::fs::read_to_string(path).ok()
 }
 
 fn frontmatter_block(content: &str) -> Option<&str> {
@@ -819,6 +861,24 @@ fn yaml_field_block(frontmatter: &str, field: &str) -> Option<String> {
     }
 }
 
+fn yaml_scalar_field(frontmatter: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    for line in frontmatter.lines() {
+        let Some(rest) = line.strip_prefix(&prefix) else {
+            continue;
+        };
+        let value = rest.trim();
+        if value.is_empty() {
+            return None;
+        }
+        if let Ok(parsed) = serde_json::from_str::<String>(value) {
+            return Some(parsed);
+        }
+        return Some(value.trim_matches('"').trim_matches('\'').to_string());
+    }
+    None
+}
+
 fn is_top_level_yaml_field(line: &str) -> bool {
     if line.is_empty() || line.starts_with(char::is_whitespace) {
         return false;
@@ -831,6 +891,28 @@ fn is_top_level_yaml_field(line: &str) -> bool {
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
         })
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn focus_target_window(window_title: &str) -> Result<(), String> {
+    let wide_title: Vec<u16> = window_title.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let hwnd = FindWindowW(PCWSTR::null(), PCWSTR(wide_title.as_ptr()))
+            .map_err(|error| format!("FindWindowW failed: {error}"))?;
+        if hwnd.0.is_null() {
+            return Err("window not found".to_string());
+        }
+        if SetForegroundWindow(hwnd).as_bool() {
+            Ok(())
+        } else {
+            Err("SetForegroundWindow returned false".to_string())
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn focus_target_window(_: &str) -> Result<(), String> {
+    Err("window focus is not implemented on this platform".to_string())
 }
 
 fn replay_python_command() -> &'static str {
