@@ -80,6 +80,10 @@ def visual_available(route: dict[str, Any]) -> bool:
     return bool(route.get("coordinates")) and importlib.util.find_spec("pyautogui") is not None
 
 
+def gesture_available(route: dict[str, Any]) -> bool:
+    return bool(route.get("events"))
+
+
 def unavailable(_: dict[str, Any]) -> bool:
     return False
 
@@ -93,6 +97,7 @@ DEFAULT_CHECKERS: dict[str, AvailabilityChecker] = {
     "shortcut": keyboard_available,
     "manual_repair": manual_repair_available,
     "visual": visual_available,
+    "gesture": gesture_available,
 }
 
 
@@ -113,6 +118,12 @@ class Router:
                 if route.get("type") != route_type:
                     continue
                 checker = self.checkers.get(route_type, unavailable)
+                if checker(route):
+                    ordered_routes.append(route)
+
+        for route in routes:
+            if route.get("type") == "gesture" and route not in ordered_routes:
+                checker = self.checkers.get("gesture", unavailable)
                 if checker(route):
                     ordered_routes.append(route)
 

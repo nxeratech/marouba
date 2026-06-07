@@ -31,10 +31,16 @@ def replay_workflow(
         return 1
 
     router = router or Router()
+    executor = executor or Executor(root)
+    gesture_routes = [route for route in workflow.get("routes", []) if route.get("type") == "gesture"]
+    if gesture_routes:
+        result = executor._execute_gesture(gesture_routes[0], params)
+        print(f"[Marouba] Gesture replay complete: {result}")
+        return 0
+
     routes = router.route_order(workflow)
     print(f"[Marouba] Route order: {', '.join(route['type'] for route in routes)}")
 
-    executor = executor or Executor(root)
     failures = []
     for route in routes:
         route_type = route["type"]
