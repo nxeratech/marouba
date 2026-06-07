@@ -88,7 +88,9 @@ function render(status: RecordingStatus) {
   dot.classList.toggle("recording", status.mode === "recording");
   recordButton.disabled = isRecording;
   stopButton.disabled = !isRecording;
-  windowLabel.textContent = `${status.active_window.app_name || "unknown"} - ${status.active_window.title || "unknown window"}`;
+  const title = status.active_window.title || "Marouba";
+  const appName = status.active_window.app_name || "";
+  windowLabel.textContent = appName && appName !== "unknown" ? `${appName} - ${title}` : title;
 
   actions.replaceChildren(
     ...status.last_actions.map((label) => {
