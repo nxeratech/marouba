@@ -405,7 +405,10 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                 }
             }
 
+            #[cfg(target_os = "windows")]
             let left = key_is_down(VK_LBUTTON.0 as i32);
+            #[cfg(not(target_os = "windows"))]
+            let left = false;
             if left != last_left {
                 last_left = left;
                 push_event(
@@ -422,7 +425,10 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                 );
             }
 
+            #[cfg(target_os = "windows")]
             let right = key_is_down(VK_RBUTTON.0 as i32);
+            #[cfg(not(target_os = "windows"))]
+            let right = false;
             if right != last_right {
                 last_right = right;
                 push_event(
