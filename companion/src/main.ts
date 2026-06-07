@@ -85,7 +85,7 @@ replayWorkflowButton.addEventListener("click", async () => {
   replayStatus.className = "running";
   replayStatus.textContent = "Replay running...";
   try {
-    const result = await companionFetch<{ status?: string; ok?: boolean; pid?: number; error?: string; focused_window?: string }>("/replay", {
+    const result = await companionFetch<{ status?: string; ok?: boolean; pid?: number; error?: string; detail?: string; focused_window?: string; target_app?: string }>("/replay", {
       method: "POST",
       body: JSON.stringify({ name: selectedWorkflow.name }),
     });
@@ -96,7 +96,11 @@ replayWorkflowButton.addEventListener("click", async () => {
       const focused = result.focused_window ? ` - focused ${result.focused_window}` : "";
       replayStatus.textContent = `Replay started${pid}${focused}`;
     } else {
-      replayStatus.textContent = result.error ?? "Replay failed";
+      if (result.error === "failed to focus target window") {
+        replayStatus.textContent = `Please open ${result.target_app ?? "the target app"} first, then click Replay.`;
+      } else {
+        replayStatus.textContent = result.error ?? "Replay failed";
+      }
     }
   } catch (error) {
     replayStatus.className = "failed";
@@ -238,7 +242,7 @@ function renderWorkflows() {
 
       const meta = document.createElement("span");
       meta.className = "workflow-meta";
-      meta.textContent = `${workflow.size_kb} KB · ${workflow.modified}`;
+      meta.textContent = `${workflow.size_kb} KB - ${workflow.modified}`;
 
       row.append(name, meta);
       row.addEventListener("click", () => {

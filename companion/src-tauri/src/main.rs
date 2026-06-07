@@ -16,6 +16,8 @@ use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
+#[cfg(target_os = "windows")]
 use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
@@ -33,9 +35,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VK_LBUTTON, VK_RBUTTON,
 };
 #[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::ShellExecuteW;
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SetCursorPos, SetForegroundWindow,
+    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
 };
 
 #[derive(Clone, Debug)]
@@ -689,11 +693,9 @@ fn vault_dir() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("vault")
+    std::env::var("LOCALAPPDATA")
+        .map(|path| PathBuf::from(path).join("Marouba").join("vault"))
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Users\Dave\AppData\Local\Marouba\vault"))
 }
 
 fn marouba_root_dir() -> PathBuf {
@@ -758,13 +760,19 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
                 Ok(window_title) => Some(window_title),
                 Err(error) => {
                     let tried = target_windows.join(", ");
+                    let target_app = target_windows
+                        .first()
+                        .map(|title| app_name_from_title(title))
+                        .unwrap_or_else(|| "the target app".to_string());
                     return (
                         json!({
                             "status": "failed",
-                            "error": format!("failed to focus target window: {error}"),
+                            "error": "failed to focus target window",
+                            "detail": error,
+                            "target_app": target_app,
                             "target_windows": tried
                         }),
-                        404,
+                        200,
                     );
                 }
             }
@@ -1499,14 +1507,39 @@ fn key_is_down(_: i32) -> bool {
 fn open_vault_folder() -> Result<(), String> {
     let path = vault_workflows_dir();
     std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    let mut command = Command::new("explorer.exe");
-    command.arg(path);
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        open_folder_with_shell_execute(&path)
     }
-    command.spawn().map(|_| ()).map_err(|error| error.to_string())
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_folder_with_shell_execute(path: &PathBuf) -> Result<(), String> {
+    let operation: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+    let file: Vec<u16> = path.to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let result = ShellExecuteW(
+            HWND(std::ptr::null_mut()),
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        if (result.0 as isize) <= 32 {
+            Err(format!("ShellExecuteW failed with code {}", result.0 as isize))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
