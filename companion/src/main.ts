@@ -28,14 +28,18 @@ const review = document.querySelector<HTMLElement>("#review")!;
 const workflowName = document.querySelector<HTMLInputElement>("#workflow-name")!;
 const saveButton = document.querySelector<HTMLButtonElement>("#save")!;
 const message = document.querySelector<HTMLParagraphElement>("#message")!;
+const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
+const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+let savedStatus: string | null = null;
 
-document.querySelector<HTMLButtonElement>("#record")!.addEventListener("click", async () => {
+recordButton.addEventListener("click", async () => {
+  savedStatus = null;
   message.textContent = "";
   await invoke("start_recording");
   await refresh();
 });
 
-document.querySelector<HTMLButtonElement>("#stop")!.addEventListener("click", async () => {
+stopButton.addEventListener("click", async () => {
   message.textContent = "";
   await invoke("stop_recording");
   await refresh();
@@ -56,7 +60,8 @@ saveButton.addEventListener("click", async () => {
     const path = await invoke<string>("save_workflow", {
       request: { name, keep_indexes: keepIndexes },
     });
-    message.textContent = `Saved ${path}`;
+    savedStatus = `Saved: ${name}`;
+    message.textContent = path;
     await refresh();
   } catch (error) {
     message.textContent = String(error);
@@ -78,8 +83,11 @@ async function refresh() {
 }
 
 function render(status: RecordingStatus) {
-  mode.textContent = status.mode;
+  const isRecording = status.mode === "recording";
+  mode.textContent = savedStatus ?? (isRecording ? "Recording..." : "Idle");
   dot.classList.toggle("recording", status.mode === "recording");
+  recordButton.disabled = isRecording;
+  stopButton.disabled = !isRecording;
   windowLabel.textContent = `${status.active_window.app_name || "unknown"} - ${status.active_window.title || "unknown window"}`;
 
   actions.replaceChildren(

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WindowEvent};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[cfg(target_os = "windows")]
@@ -139,6 +139,20 @@ fn main() {
             setup_tray(app)?;
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                match event {
+                    WindowEvent::Focused(false) => {
+                        let _ = window.hide();
+                    }
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Marouba Companion");
 }
@@ -180,13 +194,23 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_popup(tray.app_handle());
+                toggle_popup(tray.app_handle());
             }
         });
 
     builder = builder.icon(Image::new(include_bytes!("../icons/icon_rgba.bin"), 32, 32));
     let _tray = builder.build(app)?;
     Ok(())
+}
+
+fn toggle_popup(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            show_popup(app);
+        }
+    }
 }
 
 fn show_popup(app: &AppHandle) {
