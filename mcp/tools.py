@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -77,7 +79,7 @@ def replay_workflow(
             params,
             root=configured_root(),
             no_repair=no_repair,
-            router=Router(),
+            router=Router({"cli": mcp_cli_available}),
             executor=Executor(configured_root()),
         )
 
@@ -87,6 +89,26 @@ def replay_workflow(
         "stdout": stdout.getvalue(),
         "stderr": stderr.getvalue(),
     }
+
+
+def mcp_cli_available(route: dict[str, Any]) -> bool:
+    command = str(route.get("command", "")).strip()
+    if not command:
+        return False
+    executable = first_command_token(command)
+    if not executable:
+        return False
+    executable_path = Path(executable)
+    if executable_path.is_absolute() or executable_path.parent != Path("."):
+        return executable_path.exists()
+    return shutil.which(executable) is not None
+
+
+def first_command_token(command: str) -> str:
+    match = re.match(r'''^\s*(?:"([^"]+)"|'([^']+)'|(\S+))''', command)
+    if not match:
+        return ""
+    return next(group for group in match.groups() if group)
 
 
 @contextlib.contextmanager
