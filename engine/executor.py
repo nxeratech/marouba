@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,9 @@ class Executor:
                 return self._result(True, output=output, started=start, route=route, source=source)
             if route.get("type") == "visual":
                 output = self._execute_visual(route, params)
+                return self._result(True, output=output, started=start, route=route, source=source)
+            if route.get("type") == "gesture":
+                output = self._execute_gesture(route, params)
                 return self._result(True, output=output, started=start, route=route, source=source)
             if route.get("type") == "manual_repair":
                 output = params.get("output_path") or route.get("output")
@@ -116,26 +121,59 @@ class Executor:
         return params.get("output_path")
 
     def _execute_keyboard(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
+        text = route.get("text")
         sequence = route.get("keys") or route.get("sequence") or route.get("hotkey")
-        if not sequence:
-            raise RuntimeError("Keyboard route requires keys, sequence, or hotkey")
+        if text is None and not sequence:
+            raise RuntimeError("Keyboard route requires text, keys, sequence, or hotkey")
+
+        wait_before = float(route.get("wait_before", 0))
+        if wait_before > 0:
+            time.sleep(wait_before)
 
         if importlib.util.find_spec("pyautogui") is not None:
             import pyautogui
 
-            if isinstance(sequence, list):
+            if text is not None:
+                rendered_text = str(text).format(**params)
+                self._write_text_with_pyautogui(pyautogui, rendered_text, float(route.get("interval", 0.01)))
+            elif isinstance(sequence, list):
                 pyautogui.hotkey(*sequence)
             else:
                 pyautogui.hotkey(*str(sequence).replace("+", " ").split())
+            wait_seconds = float(route.get("wait_seconds", 0))
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
             return params.get("output_path")
 
         if importlib.util.find_spec("keyboard") is not None:
             import keyboard
 
-            keyboard.send("+".join(sequence) if isinstance(sequence, list) else str(sequence))
+            if text is not None:
+                keyboard.write(str(text).format(**params))
+            else:
+                keyboard.send("+".join(sequence) if isinstance(sequence, list) else str(sequence))
+            wait_seconds = float(route.get("wait_seconds", 0))
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
             return params.get("output_path")
 
         raise RuntimeError("pyautogui or keyboard is required for keyboard routes")
+
+    def _write_text_with_pyautogui(self, pyautogui: Any, text: str, interval: float) -> None:
+        buffer = []
+        for char in text:
+            if char in {"\n", "\r", "\t"}:
+                if buffer:
+                    pyautogui.write("".join(buffer), interval=interval)
+                    buffer.clear()
+                if char in {"\n", "\r"}:
+                    pyautogui.press("enter")
+                else:
+                    pyautogui.press("tab")
+            else:
+                buffer.append(char)
+        if buffer:
+            pyautogui.write("".join(buffer), interval=interval)
 
     def _execute_cli(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
         command = route.get("command")
@@ -148,7 +186,54 @@ class Executor:
         wait_seconds = float(route.get("wait_seconds", 0))
         if wait_seconds > 0:
             time.sleep(wait_seconds)
+        focus_window = route.get("focus_window") or route.get("window_title")
+        if focus_window:
+            self._focus_window(str(focus_window))
         return params.get("output_path") or completed.stdout.strip() or None
+
+    def _focus_window(self, title_fragment: str) -> None:
+        if importlib.util.find_spec("pywinauto") is not None:
+            try:
+                from pywinauto import Desktop
+
+                window = Desktop(backend="uia").window(title_re=f".*{re.escape(title_fragment)}.*")
+                if window.exists(timeout=3):
+                    window.set_focus()
+                    time.sleep(0.3)
+                    return
+            except Exception:
+                pass
+
+        if sys.platform != "win32":
+            return
+
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            matches: list[int] = []
+
+            def window_title(hwnd: int) -> str:
+                length = user32.GetWindowTextLengthW(hwnd)
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                return buffer.value
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def enum_proc(hwnd: int, _: int) -> bool:
+                if user32.IsWindowVisible(hwnd) and title_fragment.casefold() in window_title(hwnd).casefold():
+                    matches.append(hwnd)
+                return True
+
+            user32.EnumWindows(enum_proc, None)
+            if matches:
+                hwnd = matches[0]
+                user32.ShowWindow(hwnd, 9)
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                time.sleep(0.3)
+        except Exception:
+            return
 
     def _execute_visual(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
         coordinates = route.get("coordinates")
@@ -162,6 +247,27 @@ class Executor:
             return params.get("output_path")
 
         raise RuntimeError("pyautogui is required to replay visual coordinate routes")
+
+    def _execute_gesture(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
+        events = route.get("events")
+        if not isinstance(events, list) or not events:
+            raise RuntimeError("Gesture route requires recorded events")
+        if not self.companion.health():
+            raise RuntimeError("Companion is not running; gesture replay requires /mouse")
+
+        response = self.companion.mouse(
+            {
+                "target_window": route.get("target_window") or route.get("window_title"),
+                "events": events,
+            }
+        )
+        if not response.get("ok", False):
+            raise RuntimeError(response.get("error", "Companion mouse replay failed"))
+
+        wait_seconds = float(route.get("wait_seconds", 0))
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        return params.get("output_path")
 
     def _resolve_output(self, history_item: dict[str, Any], params: dict[str, Any]) -> str | None:
         if params.get("output_path"):

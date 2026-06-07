@@ -35,6 +35,9 @@ class CompanionClient:
     def screenshot(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.post("/screenshot", payload)
 
+    def mouse(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/mouse", payload)
+
     def get(self, path: str) -> dict[str, Any]:
         return self._request("GET", path)
 

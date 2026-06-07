@@ -14,7 +14,22 @@
           <h1 id="window">No active window yet</h1>
         </div>
       </section>
-      <ol id="actions"></ol>
+      <section class="controls">
+        <button id="record">Record</button>
+        <button id="stop" class="secondary">Stop</button>
+        <button id="open-vault" class="secondary">Open Vault</button>
+      </section>
+      <section class="panel">
+        <h2>Last actions</h2>
+        <ol id="actions"></ol>
+      </section>
+      <section id="review" class="panel" hidden>
+        <h2>Review capture</h2>
+        <input id="workflow-name" placeholder="Workflow name" />
+        <div id="steps"></div>
+        <button id="save">Save Workflow</button>
+      </section>
+      <p id="message"></p>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

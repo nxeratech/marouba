@@ -12,9 +12,10 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Marouba Companion",
-        "width": 320,
-        "height": 220,
+        "width": 390,
+        "height": 560,
         "visible": false
       }
     ],
@@ -25,6 +26,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
   }
 }
