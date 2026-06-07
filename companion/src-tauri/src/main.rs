@@ -1298,12 +1298,12 @@ fn write_workflow(name: &str, events: &[RecordedEvent], metadata: WorkflowMetada
         .iter()
         .find_map(|event| event.window_title.clone())
         .unwrap_or_else(|| "Windows".to_string());
-    let routes_json = serde_json::to_string_pretty(&json!([{
-        "type": "gesture",
-        "target_window": app,
-        "events": events
-    }]))
-    .map_err(|error| error.to_string())?;
+    let events_json = serde_json::to_string_pretty(events).map_err(|error| error.to_string())?;
+    let routes_json = format!(
+        "[\n  {{\n    \"type\": \"gesture\",\n    \"events\": {},\n    \"target_window\": {}\n  }}\n]",
+        indent_json_value(&events_json, 4),
+        yaml_scalar(&app),
+    );
 
     let body = format!(
         "---\n\
@@ -1344,6 +1344,22 @@ depends_on: []\n\
 
 fn yaml_scalar(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn indent_json_value(value: &str, spaces: usize) -> String {
+    let padding = " ".repeat(spaces);
+    value
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                line.to_string()
+            } else {
+                format!("{padding}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn slugify(value: &str) -> String {

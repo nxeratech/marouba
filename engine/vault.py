@@ -32,6 +32,7 @@ class Vault:
         data = dict(post.metadata)
         data["body"] = post.content
         data["_path"] = str(path)
+        normalize_gesture_routes(data)
         return data
 
     def save_workflow(self, workflow: dict[str, Any], filename: str | None = None) -> Path:
@@ -98,3 +99,12 @@ class Vault:
 def sanitize_workflow_id(workflow_id: str) -> str:
     sanitized = re.sub(r"[^a-z0-9\-_]", "", workflow_id.casefold())
     return sanitized or "workflow"
+
+
+def normalize_gesture_routes(workflow: dict[str, Any]) -> None:
+    routes = workflow.get("routes")
+    if not isinstance(routes, list):
+        return
+    for route in routes:
+        if isinstance(route, dict) and "events" in route and "type" not in route:
+            route["type"] = "gesture"
