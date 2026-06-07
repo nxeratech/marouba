@@ -16,11 +16,9 @@ use tauri::{AppHandle, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[cfg(target_os = "windows")]
-use windows::core::PCWSTR;
-#[cfg(target_os = "windows")]
 use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -36,8 +34,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, SetCursorPos,
-    SetForegroundWindow,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    IsWindowVisible, SetCursorPos, SetForegroundWindow,
 };
 
 #[derive(Clone, Debug)]
@@ -958,19 +956,61 @@ fn is_top_level_yaml_field(line: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn focus_target_window(window_title: &str) -> Result<(), String> {
-    let wide_title: Vec<u16> = window_title.encode_utf16().chain(Some(0)).collect();
+    let hwnd = find_window_containing(window_title)
+        .ok_or_else(|| format!("no visible top-level window contains '{window_title}'"))?;
     unsafe {
-        let hwnd = FindWindowW(PCWSTR::null(), PCWSTR(wide_title.as_ptr()))
-            .map_err(|error| format!("FindWindowW failed: {error}"))?;
-        if hwnd.0.is_null() {
-            return Err("window not found".to_string());
-        }
         if SetForegroundWindow(hwnd).as_bool() {
             Ok(())
         } else {
             Err("SetForegroundWindow returned false".to_string())
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowSearch {
+    needles: Vec<String>,
+    hwnd: Option<HWND>,
+}
+
+#[cfg(target_os = "windows")]
+fn find_window_containing(target: &str) -> Option<HWND> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let mut needles = vec![target.to_ascii_lowercase()];
+    if let Some((_, app_hint)) = target.rsplit_once(" - ") {
+        let app_hint = app_hint.trim().to_ascii_lowercase();
+        if !app_hint.is_empty() && !needles.iter().any(|needle| needle == &app_hint) {
+            needles.push(app_hint);
+        }
+    }
+    let mut search = WindowSearch { needles, hwnd: None };
+    unsafe {
+        let search_ptr = &mut search as *mut WindowSearch;
+        let _ = EnumWindows(Some(enum_windows_match_title), LPARAM(search_ptr as isize));
+    }
+    search.hwnd
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn enum_windows_match_title(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = &mut *(lparam.0 as *mut WindowSearch);
+    if !IsWindowVisible(hwnd).as_bool() {
+        return true.into();
+    }
+    let mut buffer = [0u16; 512];
+    let len = GetWindowTextW(hwnd, &mut buffer);
+    if len <= 0 {
+        return true.into();
+    }
+    let title = String::from_utf16_lossy(&buffer[..len as usize]).to_ascii_lowercase();
+    if search.needles.iter().any(|needle| title.contains(needle)) {
+        search.hwnd = Some(hwnd);
+        return false.into();
+    }
+    true.into()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1459,11 +1499,14 @@ fn key_is_down(_: i32) -> bool {
 fn open_vault_folder() -> Result<(), String> {
     let path = vault_workflows_dir();
     std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Command::new("explorer.exe")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let mut command = Command::new("explorer.exe");
+    command.arg(path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command.spawn().map(|_| ()).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug)]
