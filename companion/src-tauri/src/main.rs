@@ -734,7 +734,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
     };
 
-    let child = Command::new("python")
+    let child = Command::new(replay_python_command())
         .current_dir(marouba_root_dir())
         .args(["scripts/replay.py", "--workflow", &name])
         .spawn();
@@ -745,6 +745,22 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
             500,
         ),
     }
+}
+
+fn replay_python_command() -> &'static str {
+    if command_exists("python") {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn delete_saved_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
