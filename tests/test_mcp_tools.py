@@ -29,7 +29,7 @@ def workflow_dict() -> dict:
         "tags": ["mcp", "test"],
         "author": "nxeratech",
         "created": "2026-06-07",
-        "routes": [{"type": "cli", "command": f'"{sys.executable}" --version'}],
+        "routes": [{"type": "cli", "command": f"{sys.executable} --version"}],
         "fallback_order": ["cli", "ask"],
         "verification": {"type": "none"},
         "calls": [],
