@@ -19,6 +19,18 @@
         <button id="stop" class="stop" disabled>Stop</button>
         <button id="open-vault" class="secondary">Open Vault</button>
       </section>
+      <section class="panel workflows-panel">
+        <div class="panel-head">
+          <h2>Workflows</h2>
+          <button id="refresh-workflows" class="icon-button" title="Refresh workflows">Refresh</button>
+        </div>
+        <div id="workflow-list" class="workflow-list"></div>
+        <div id="workflow-actions" class="workflow-actions" hidden>
+          <button id="replay-workflow">Replay</button>
+          <button id="delete-workflow" class="danger">Delete</button>
+        </div>
+        <p id="replay-status" hidden></p>
+      </section>
       <section class="panel">
         <h2>Last actions</h2>
         <ol id="actions"></ol>

@@ -105,6 +105,24 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.panel-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.panel-head h2 {
+  margin: 0;
+}
+
+.icon-button {
+  background: #1f2937;
+  color: #cbd5e1;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
 ol {
   margin: 0;
   padding-left: 18px;
@@ -114,6 +132,94 @@ li {
   color: #cbd5e1;
   font-size: 12px;
   margin: 5px 0;
+}
+
+.workflows-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.workflow-list {
+  display: grid;
+  gap: 6px;
+  max-height: 138px;
+  overflow: auto;
+}
+
+.workflow-row {
+  align-items: start;
+  background: #0f141f;
+  border: 1px solid #232b3b;
+  border-radius: 6px;
+  color: #dbe5f3;
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  min-height: 0;
+  padding: 8px;
+  text-align: left;
+}
+
+.workflow-row.selected {
+  background: #7B2FBE;
+  border-color: #9b64d0;
+  color: #fff;
+}
+
+.workflow-name {
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.workflow-meta {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.workflow-row.selected .workflow-meta {
+  color: #eadcff;
+}
+
+.workflow-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.workflow-actions[hidden] {
+  display: none;
+}
+
+#replay-workflow {
+  background: #7B2FBE;
+}
+
+#delete-workflow.danger {
+  background: #3a1017;
+  color: #fecdd3;
+}
+
+#replay-status {
+  color: #a7b4c8;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+#replay-status[hidden] {
+  display: none;
+}
+
+#replay-status.running {
+  color: #facc15;
+}
+
+#replay-status.completed {
+  color: #86efac;
+}
+
+#replay-status.failed {
+  color: #f87171;
 }
 
 #review {

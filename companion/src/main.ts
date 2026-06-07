@@ -19,10 +19,22 @@ type RecordingStatus = {
   last_actions: string[];
 };
 
+type VaultWorkflow = {
+  name: string;
+  size_kb: number;
+  modified: string;
+};
+
 const mode = document.querySelector<HTMLParagraphElement>("#mode")!;
 const dot = document.querySelector<HTMLSpanElement>("#dot")!;
 const windowLabel = document.querySelector<HTMLHeadingElement>("#window")!;
 const actions = document.querySelector<HTMLOListElement>("#actions")!;
+const workflowList = document.querySelector<HTMLDivElement>("#workflow-list")!;
+const workflowActions = document.querySelector<HTMLElement>("#workflow-actions")!;
+const refreshWorkflowsButton = document.querySelector<HTMLButtonElement>("#refresh-workflows")!;
+const replayWorkflowButton = document.querySelector<HTMLButtonElement>("#replay-workflow")!;
+const deleteWorkflowButton = document.querySelector<HTMLButtonElement>("#delete-workflow")!;
+const replayStatus = document.querySelector<HTMLParagraphElement>("#replay-status")!;
 const steps = document.querySelector<HTMLDivElement>("#steps")!;
 const review = document.querySelector<HTMLElement>("#review")!;
 const workflowName = document.querySelector<HTMLInputElement>("#workflow-name")!;
@@ -33,6 +45,9 @@ const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
 let savedStatus: string | null = null;
 let reviewWasVisible = false;
+let apiToken: string | null = null;
+let workflows: VaultWorkflow[] = [];
+let selectedWorkflow: VaultWorkflow | null = null;
 
 recordButton.addEventListener("click", async () => {
   savedStatus = null;
@@ -49,6 +64,35 @@ stopButton.addEventListener("click", async () => {
 
 document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("click", async () => {
   await invoke("open_vault");
+});
+
+refreshWorkflowsButton.addEventListener("click", async () => {
+  await loadWorkflows();
+});
+
+replayWorkflowButton.addEventListener("click", async () => {
+  if (!selectedWorkflow) {
+    return;
+  }
+  replayStatus.hidden = false;
+  replayStatus.className = "running";
+  replayStatus.textContent = "Replay running...";
+  try {
+    const result = await companionFetch<{ status: string; pid?: number; error?: string }>("/replay", {
+      method: "POST",
+      body: JSON.stringify({ name: selectedWorkflow.name }),
+    });
+    replayStatus.className = result.status === "started" ? "completed" : "failed";
+    replayStatus.textContent =
+      result.status === "started" ? `Replay started${result.pid ? ` (pid ${result.pid})` : ""}` : result.error ?? "Replay failed";
+  } catch (error) {
+    replayStatus.className = "failed";
+    replayStatus.textContent = String(error);
+  }
+});
+
+deleteWorkflowButton.addEventListener("click", () => {
+  void deleteSelectedWorkflow();
 });
 
 workflowName.addEventListener("input", () => {
@@ -72,6 +116,7 @@ saveButton.addEventListener("click", async () => {
     });
     savedStatus = `Saved: ${name}`;
     message.textContent = path;
+    await loadWorkflows();
     await refresh();
   } catch (error) {
     message.textContent = String(error);
@@ -90,6 +135,96 @@ async function refresh() {
     windowLabel.textContent = "Companion unavailable";
     message.textContent = String(error);
   }
+}
+
+async function loadWorkflows() {
+  workflowList.textContent = "Loading workflows...";
+  try {
+    workflows = await companionFetch<VaultWorkflow[]>("/workflows");
+    selectedWorkflow = selectedWorkflow
+      ? workflows.find((workflow) => workflow.name === selectedWorkflow?.name) ?? null
+      : null;
+    renderWorkflows();
+  } catch (error) {
+    workflowList.textContent = `Unable to load workflows: ${String(error)}`;
+    workflowActions.hidden = true;
+  }
+}
+
+async function deleteSelectedWorkflow() {
+  if (!selectedWorkflow) {
+    return;
+  }
+  const name = selectedWorkflow.name;
+  if (!confirm(`Delete workflow "${name}"?`)) {
+    return;
+  }
+  replayStatus.hidden = false;
+  replayStatus.className = "running";
+  replayStatus.textContent = "Deleting workflow...";
+  try {
+    await companionFetch<{ status: string }>("/workflow/delete", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    selectedWorkflow = null;
+    replayStatus.className = "completed";
+    replayStatus.textContent = "Workflow deleted.";
+    await loadWorkflows();
+  } catch (error) {
+    replayStatus.className = "failed";
+    replayStatus.textContent = String(error);
+  }
+}
+
+async function companionFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!apiToken) {
+    apiToken = await invoke<string>("companion_token");
+  }
+  const response = await fetch(`http://localhost:7842${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `HTTP ${response.status}`);
+  }
+  return body as T;
+}
+
+function renderWorkflows() {
+  workflowList.replaceChildren(
+    ...workflows.map((workflow) => {
+      const row = document.createElement("button");
+      row.className = "workflow-row";
+      row.classList.toggle("selected", selectedWorkflow?.name === workflow.name);
+      row.type = "button";
+
+      const name = document.createElement("span");
+      name.className = "workflow-name";
+      name.textContent = workflow.name;
+
+      const meta = document.createElement("span");
+      meta.className = "workflow-meta";
+      meta.textContent = `${workflow.size_kb} KB · ${workflow.modified}`;
+
+      row.append(name, meta);
+      row.addEventListener("click", () => {
+        selectedWorkflow = workflow;
+        replayStatus.hidden = true;
+        renderWorkflows();
+      });
+      return row;
+    }),
+  );
+  if (workflows.length === 0) {
+    workflowList.textContent = "No workflows saved yet.";
+  }
+  workflowActions.hidden = selectedWorkflow === null;
 }
 
 function render(status: RecordingStatus) {
@@ -174,4 +309,5 @@ function describeStep(step: RecordedEvent, index: number) {
 }
 
 refresh();
+loadWorkflows();
 setInterval(refresh, 1500);

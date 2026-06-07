@@ -69,6 +69,11 @@ struct MouseReplayRequest {
     events: Vec<RecordedEvent>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayWorkflowRequest {
+    name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct WindowRect {
     left: i32,
@@ -114,6 +119,13 @@ struct RecordingStatus {
     last_actions: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct VaultWorkflowSummary {
+    name: String,
+    size_kb: u64,
+    modified: String,
+}
+
 fn main() {
     let token = load_or_create_token();
     let state = Arc::new(Mutex::new(AppState {
@@ -135,7 +147,8 @@ fn main() {
             recording_status,
             save_workflow,
             delete_step,
-            open_vault
+            open_vault,
+            companion_token
         ])
         .setup(|app| {
             setup_tray(app)?;
@@ -269,6 +282,13 @@ fn open_vault() -> Result<(), String> {
     open_vault_folder()
 }
 
+#[tauri::command]
+fn companion_token() -> Result<String, String> {
+    std::fs::read_to_string(token_path())
+        .map(|token| token.trim().to_string())
+        .map_err(|error| error.to_string())
+}
+
 fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let should_spawn = {
         let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
@@ -326,6 +346,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let mut last_keys = HashSet::<i32>::new();
     let mut last_title = String::new();
     let mut current_app_name = String::new();
+    let mut last_mousemove_pos: Option<(i32, i32)> = None;
 
     loop {
         let recording = state.lock().map(|guard| guard.recording).unwrap_or(false);
@@ -367,18 +388,21 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
         if let Some((x, y)) = cursor_position() {
             if last_pos != Some((x, y)) {
                 last_pos = Some((x, y));
-                push_event(
-                    &state,
-                    mouse_event_record(
-                        "mousemove",
-                        x,
-                        y,
-                        None,
-                        started.elapsed().as_millis(),
-                        &window,
-                        &current_app_name,
-                    ),
-                );
+                if should_record_mousemove(last_mousemove_pos, x, y) {
+                    last_mousemove_pos = Some((x, y));
+                    push_event(
+                        &state,
+                        mouse_event_record(
+                            "mousemove",
+                            x,
+                            y,
+                            None,
+                            started.elapsed().as_millis(),
+                            &window,
+                            &current_app_name,
+                        ),
+                    );
+                }
             }
 
             let left = key_is_down(VK_LBUTTON.0 as i32);
@@ -477,6 +501,17 @@ fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
     }
 }
 
+fn should_record_mousemove(previous: Option<(i32, i32)>, x: i32, y: i32) -> bool {
+    match previous {
+        None => true,
+        Some((previous_x, previous_y)) => {
+            let dx = (x - previous_x) as f64;
+            let dy = (y - previous_y) as f64;
+            (dx * dx + dy * dy).sqrt() > 8.0
+        }
+    }
+}
+
 fn push_log(state: &mut AppState, label: String) {
     state.last_actions.insert(0, label);
     state.last_actions.truncate(5);
@@ -557,6 +592,10 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
         let response = match (method, url.as_str()) {
             (Method::Get, "/health") => json_response(json!({"status": "ok"}), 200),
             (Method::Get, "/window") => json_response(json!(active_window()), 200),
+            (Method::Get, "/workflows") => {
+                let (body, status) = list_saved_workflows();
+                json_response(body, status)
+            }
             (Method::Get, "/recording") => json_response(json!(status_from_state(&state)), 200),
             (Method::Post, "/record/start") => {
                 let _ = start_recording_from_state(state.clone());
@@ -579,6 +618,16 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
             (Method::Post, "/mouse") => {
                 let payload: MouseReplayRequest = read_json(&mut request);
                 let (body, status) = replay_mouse(payload);
+                json_response(body, status)
+            }
+            (Method::Post, "/replay") => {
+                let payload: ReplayWorkflowRequest = read_json(&mut request);
+                let (body, status) = start_replay_workflow(payload);
+                json_response(body, status)
+            }
+            (Method::Post, "/workflow/delete") => {
+                let payload: ReplayWorkflowRequest = read_json(&mut request);
+                let (body, status) = delete_saved_workflow(payload);
                 json_response(body, status)
             }
             (Method::Post, "/screenshot") => {
@@ -620,6 +669,124 @@ fn token_path() -> PathBuf {
 
 fn vault_workflows_dir() -> PathBuf {
     PathBuf::from(r"C:\Share\Marouba\vault\workflows")
+}
+
+fn marouba_root_dir() -> PathBuf {
+    PathBuf::from(r"C:\Share\Marouba")
+}
+
+fn list_saved_workflows() -> (Value, u16) {
+    let dir = vault_workflows_dir();
+    let mut workflows = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (json!([]), 200),
+        Err(error) => {
+            return (
+                json!({"error": format!("failed to read workflow vault: {error}")}),
+                500,
+            )
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workflow")
+            .to_string();
+        workflows.push(VaultWorkflowSummary {
+            name,
+            size_kb: (metadata.len() + 1023) / 1024,
+            modified: metadata
+                .modified()
+                .ok()
+                .map(|modified| format_modified_time(&path, modified))
+                .unwrap_or_else(|| "unknown".to_string()),
+        });
+    }
+
+    workflows.sort_by(|left, right| left.name.cmp(&right.name));
+    (json!(workflows), 200)
+}
+
+fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
+    let name = match safe_workflow_name(&payload.name) {
+        Ok(name) => name,
+        Err(error) => return (json!({"status": "failed", "error": error}), 400),
+    };
+
+    let child = Command::new("python")
+        .current_dir(marouba_root_dir())
+        .args(["scripts/replay.py", "--workflow", &name])
+        .spawn();
+    match child {
+        Ok(child) => (json!({"status": "started", "pid": child.id()}), 200),
+        Err(error) => (
+            json!({"status": "failed", "error": format!("failed to start replay: {error}")}),
+            500,
+        ),
+    }
+}
+
+fn delete_saved_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
+    let name = match safe_workflow_name(&payload.name) {
+        Ok(name) => name,
+        Err(error) => return (json!({"status": "failed", "error": error}), 400),
+    };
+    let path = vault_workflows_dir().join(format!("{name}.md"));
+    match std::fs::remove_file(&path) {
+        Ok(_) => (json!({"status": "deleted", "name": name}), 200),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            json!({"status": "failed", "error": "workflow not found"}),
+            404,
+        ),
+        Err(error) => (
+            json!({"status": "failed", "error": format!("failed to delete workflow: {error}")}),
+            500,
+        ),
+    }
+}
+
+fn safe_workflow_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+        Err("workflow name must contain only letters, numbers, hyphen, or underscore".to_string())
+    } else {
+        Ok(name.to_string())
+    }
+}
+
+fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Item -LiteralPath $args[0]).LastWriteTime.ToString('yyyy-MM-dd HH:mm')",
+            &path.display().to_string(),
+        ])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    let seconds = modified
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("unix-{seconds}")
 }
 
 fn is_authorized(request: &tiny_http::Request, token: &str) -> bool {
