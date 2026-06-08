@@ -1298,6 +1298,7 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     // BlockInput removed — caused system lockout on replay failure.
     let mut replay_rect = active_window_rect();
+    write_debug_log(&format!("replay_mouse called, events count: {}", payload.events.len()));
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
     if replay_payload_targets_ms_paint(&payload) {
@@ -1325,6 +1326,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         }
         if is_colour_select_event(event) {
             if let Some(colour_hex) = event.colour_hex.as_deref() {
+                write_debug_log(&format!("colour_select: hex={colour_hex}"));
                 match replay_ms_paint_colour_select(colour_hex) {
                     Ok(()) => {
                         skipped_colour_mouseup = true;
@@ -1346,6 +1348,14 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             }
         }
         let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
+        write_debug_log(&format!(
+            "event: {} {:?} {:?} -> screen {},{}",
+            event.kind,
+            event.normalized_x,
+            event.normalized_y,
+            x,
+            y
+        ));
         unsafe {
             let _ = SetCursorPos(x, y);
             match (event.kind.as_str(), event.button.as_deref().unwrap_or("left")) {
@@ -1409,6 +1419,22 @@ fn replay_payload_targets_ms_paint(payload: &MouseReplayRequest) -> bool {
         .map(title_is_ms_paint)
         .unwrap_or(false)
         || payload.events.iter().any(is_ms_paint_event)
+}
+
+fn write_debug_log(msg: &str) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{timestamp}] {msg}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\Share\Marouba\companion\replay-debug.log")
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1481,15 +1507,23 @@ fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
 fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRect, String> {
     let (hwnd, rect) = find_paint_window(payload)
         .ok_or_else(|| "Could not find MS Paint window for replay prelude".to_string())?;
+    write_debug_log(&format!(
+        "Paint HWND found, rect: {} {} {} {}",
+        rect.left, rect.top, rect.width, rect.height
+    ));
     unsafe {
         let _ = SendMessageW(hwnd, WM_SETFOCUS, WPARAM(0), LPARAM(0));
     }
+    write_debug_log("WM_SETFOCUS sent");
     thread::sleep(Duration::from_millis(300));
     send_key(VK_ESCAPE)?;
+    write_debug_log("sent key: VK_ESCAPE");
     thread::sleep(Duration::from_millis(200));
     send_key(VK_ESCAPE)?;
+    write_debug_log("sent key: VK_ESCAPE");
     thread::sleep(Duration::from_millis(200));
-    click_window_normalized(&rect, 0.168, 0.138, "Paint pencil tool")?;
+    let (click_x, click_y) = click_window_normalized(&rect, 0.168, 0.138, "Paint pencil tool")?;
+    write_debug_log(&format!("canvas click sent at {click_x},{click_y}"));
     thread::sleep(Duration::from_millis(300));
     Ok(rect)
 }
@@ -1538,13 +1572,14 @@ fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
 }
 
 #[cfg(target_os = "windows")]
-fn click_window_normalized(rect: &WindowRect, normalized_x: f64, normalized_y: f64, label: &str) -> Result<(), String> {
+fn click_window_normalized(rect: &WindowRect, normalized_x: f64, normalized_y: f64, label: &str) -> Result<(i32, i32), String> {
     let x = rect.left + (normalized_x.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
     let y = rect.top + (normalized_y.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
     unsafe {
         SetCursorPos(x, y).map_err(|error| format!("failed to move cursor to {label}: {error}"))?;
     }
-    send_mouse_click()
+    send_mouse_click()?;
+    Ok((x, y))
 }
 
 #[cfg(target_os = "windows")]
