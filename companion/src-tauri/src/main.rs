@@ -39,7 +39,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, BlockInput, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_HOME, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
+    VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -1475,8 +1475,11 @@ fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn prepare_ms_paint_replay_tool() -> Result<(), String> {
-    send_modified_key(VK_CONTROL, VK_HOME)?;
+    send_key(VK_ESCAPE)?;
+    thread::sleep(Duration::from_millis(100));
     send_key(VIRTUAL_KEY(0x50))?;
+    thread::sleep(Duration::from_millis(100));
+    send_key(VK_ESCAPE)?;
     thread::sleep(Duration::from_millis(200));
     Ok(())
 }
