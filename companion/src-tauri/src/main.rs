@@ -36,7 +36,7 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, BlockInput, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
+    mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
     INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON,
@@ -1296,7 +1296,7 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
-    let _input_guard = InputBlockGuard::new();
+    // BlockInput removed — caused system lockout on replay failure.
     let mut replay_rect = active_window_rect();
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
@@ -2001,28 +2001,6 @@ fn open_vault_folder() -> Result<(), String> {
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct InputBlockGuard {
-    blocked: bool,
-}
-
-#[cfg(target_os = "windows")]
-impl InputBlockGuard {
-    fn new() -> Self {
-        let blocked = unsafe { BlockInput(BOOL(1)).is_ok() };
-        Self { blocked }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for InputBlockGuard {
-    fn drop(&mut self) {
-        if self.blocked {
-            let _ = unsafe { BlockInput(BOOL(0)) };
-        }
     }
 }
 
