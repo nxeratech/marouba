@@ -1486,13 +1486,11 @@ fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRe
     }
     thread::sleep(Duration::from_millis(300));
     send_key(VK_ESCAPE)?;
-    thread::sleep(Duration::from_millis(150));
-    send_key(VIRTUAL_KEY(0x50))?;
-    thread::sleep(Duration::from_millis(150));
-    send_key(VK_ESCAPE)?;
-    thread::sleep(Duration::from_millis(150));
-    click_window_center(&rect)?;
     thread::sleep(Duration::from_millis(200));
+    send_key(VK_ESCAPE)?;
+    thread::sleep(Duration::from_millis(200));
+    click_window_normalized(&rect, 0.168, 0.138, "Paint pencil tool")?;
+    thread::sleep(Duration::from_millis(300));
     Ok(rect)
 }
 
@@ -1540,11 +1538,11 @@ fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
 }
 
 #[cfg(target_os = "windows")]
-fn click_window_center(rect: &WindowRect) -> Result<(), String> {
-    let x = rect.left + (0.5 * rect.width as f64).round() as i32;
-    let y = rect.top + (0.5 * rect.height as f64).round() as i32;
+fn click_window_normalized(rect: &WindowRect, normalized_x: f64, normalized_y: f64, label: &str) -> Result<(), String> {
+    let x = rect.left + (normalized_x.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
+    let y = rect.top + (normalized_y.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
     unsafe {
-        SetCursorPos(x, y).map_err(|error| format!("failed to move cursor to Paint canvas center: {error}"))?;
+        SetCursorPos(x, y).map_err(|error| format!("failed to move cursor to {label}: {error}"))?;
     }
     send_mouse_click()
 }
