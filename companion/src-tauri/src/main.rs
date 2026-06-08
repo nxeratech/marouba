@@ -42,8 +42,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
+    EnumWindows, GetCursorPos, GetDesktopWindow, GetForegroundWindow, GetWindowRect,
+    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
 };
 
 #[derive(Clone, Debug)]
@@ -628,13 +628,38 @@ fn mouse_event_record(
             event.element_name = body.get("name").and_then(Value::as_str).map(str::to_string);
             event.element_role = body.get("control_type").map(Value::to_string);
         }
-        if is_ms_paint_event(&event)
-            && normalized_y.map(|value| value < 0.16 && value > 0.09).unwrap_or(false)
-        {
-            if let Some(colour_hex) = sample_screen_colour_hex(x, y) {
-                event.colour_hex = Some(colour_hex);
-                event.semantic = Some("colour_select".to_string());
+        let paint_window = is_ms_paint_event(&event) || title_is_ms_paint(&window.title);
+        let in_colour_bar = normalized_y
+            .map(|value| value < 0.16 && value > 0.09)
+            .unwrap_or(false);
+        if paint_window && in_colour_bar {
+            match sample_screen_colour_hex(x, y) {
+                Some(colour_hex) => {
+                    eprintln!(
+                        "[Marouba] Captured MS Paint colour {colour_hex} at ({x}, {y}) in '{}'",
+                        window.title
+                    );
+                    event.colour_hex = Some(colour_hex);
+                    event.semantic = Some("colour_select".to_string());
+                }
+                None => {
+                    eprintln!(
+                        "[Marouba] Failed to capture MS Paint colour at ({x}, {y}) in '{}'",
+                        window.title
+                    );
+                }
             }
+        } else if title_is_ms_paint(&window.title) {
+            eprintln!(
+                "[Marouba] MS Paint mousedown outside colour bar at normalized_y={:?}",
+                normalized_y
+            );
+        } else {
+            eprintln!(
+                "[Marouba] Colour capture skipped; window title '{}' app '{}'",
+                window.title,
+                current_app_name
+            );
         }
     }
     event
@@ -1324,7 +1349,8 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
 }
 
 fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i32, i32) {
-    if let (Some(rect), Some(nx), Some(ny)) = (rect, event.normalized_x, event.normalized_y) {
+    let replay_rect = rect.or(event.window_rect.as_ref());
+    if let (Some(rect), Some(nx), Some(ny)) = (replay_rect, event.normalized_x, event.normalized_y) {
         let x = rect.left + (nx.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
         let y = rect.top + (ny.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
         return (x, y);
@@ -1343,25 +1369,32 @@ fn is_ms_paint_event(event: &RecordedEvent) -> bool {
     event
         .app_name
         .as_deref()
-        .map(|value| value.to_ascii_lowercase().contains("paint"))
+        .map(title_is_ms_paint)
         .unwrap_or(false)
         || event
             .window_title
             .as_deref()
-            .map(|value| value.to_ascii_lowercase().contains("paint"))
+            .map(title_is_ms_paint)
             .unwrap_or(false)
+}
+
+fn title_is_ms_paint(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("paint")
 }
 
 #[cfg(target_os = "windows")]
 fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
     unsafe {
-        let hdc = GetDC(HWND(std::ptr::null_mut()));
+        let desktop = GetDesktopWindow();
+        let hdc = GetDC(desktop);
         if hdc.0.is_null() {
+            eprintln!("[Marouba] GetDC(GetDesktopWindow()) returned null while sampling colour");
             return None;
         }
         let colour = GetPixel(hdc, x, y);
-        let _ = ReleaseDC(HWND(std::ptr::null_mut()), hdc);
+        let _ = ReleaseDC(desktop, hdc);
         if colour.0 == 0xFFFF_FFFF {
+            eprintln!("[Marouba] GetPixel returned CLR_INVALID at ({x}, {y})");
             return None;
         }
         let value = colour.0;
