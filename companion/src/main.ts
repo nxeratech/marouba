@@ -65,15 +65,7 @@ stopButton.addEventListener("click", async () => {
 });
 
 document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("click", async () => {
-  vaultDrawer.hidden = false;
-  try {
-    await companionFetch<{ status: string }>("/open-vault", { method: "POST" });
-  } catch (error) {
-    replayStatus.hidden = false;
-    replayStatus.className = "failed";
-    replayStatus.textContent = `Unable to open vault folder: ${String(error)}`;
-  }
-  await loadWorkflows();
+  await chooseWorkflows();
 });
 
 closeVaultButton.addEventListener("click", () => {
@@ -81,7 +73,7 @@ closeVaultButton.addEventListener("click", () => {
 });
 
 refreshWorkflowsButton.addEventListener("click", async () => {
-  await loadWorkflows();
+  await chooseWorkflows();
 });
 
 replayWorkflowButton.addEventListener("click", async () => {
@@ -140,7 +132,6 @@ saveButton.addEventListener("click", async () => {
     });
     savedStatus = `Saved: ${name}`;
     message.textContent = path;
-    await loadWorkflows();
     await refresh();
   } catch (error) {
     message.textContent = String(error);
@@ -161,16 +152,23 @@ async function refresh() {
   }
 }
 
-async function loadWorkflows() {
-  workflowList.textContent = "Loading workflows...";
+async function chooseWorkflows() {
   try {
-    workflows = await companionFetch<VaultWorkflow[]>("/workflows");
-    selectedWorkflow = selectedWorkflow
-      ? workflows.find((workflow) => workflow.name === selectedWorkflow?.name) ?? null
-      : null;
+    const picked = await invoke<VaultWorkflow[]>("pick_workflows");
+    if (picked.length === 0) {
+      if (workflows.length === 0) {
+        vaultDrawer.hidden = true;
+      }
+      return;
+    }
+    workflows = picked;
+    selectedWorkflow = workflows[0] ?? null;
+    vaultDrawer.hidden = false;
+    replayStatus.hidden = true;
     renderWorkflows();
   } catch (error) {
-    workflowList.textContent = `Unable to load workflows: ${String(error)}`;
+    vaultDrawer.hidden = true;
+    message.textContent = `Unable to load workflows: ${String(error)}`;
     workflowActions.hidden = true;
   }
 }
@@ -194,7 +192,10 @@ async function deleteSelectedWorkflow() {
     selectedWorkflow = null;
     replayStatus.className = "completed";
     replayStatus.textContent = "Workflow deleted.";
-    await loadWorkflows();
+    workflows = workflows.filter((workflow) => workflow.name !== name);
+    selectedWorkflow = workflows[0] ?? null;
+    renderWorkflows();
+    vaultDrawer.hidden = workflows.length === 0;
   } catch (error) {
     replayStatus.className = "failed";
     replayStatus.textContent = String(error);
@@ -247,11 +248,7 @@ function renderWorkflows() {
       name.className = "workflow-name";
       name.textContent = workflow.name;
 
-      const meta = document.createElement("span");
-      meta.className = "workflow-meta";
-      meta.textContent = `${workflow.size_kb} KB - ${workflow.modified}`;
-
-      row.append(name, meta);
+      row.append(name);
       row.addEventListener("click", () => {
         selectedWorkflow = workflow;
         replayStatus.hidden = true;
@@ -261,9 +258,10 @@ function renderWorkflows() {
     }),
   );
   if (workflows.length === 0) {
-    workflowList.textContent = "No workflows saved yet.";
+    workflowList.textContent = "Choose one or more workflow files.";
   }
   workflowActions.hidden = selectedWorkflow === null;
+  vaultDrawer.hidden = workflows.length === 0;
 }
 
 function render(status: RecordingStatus) {

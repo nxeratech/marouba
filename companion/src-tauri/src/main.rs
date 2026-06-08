@@ -153,6 +153,7 @@ fn main() {
             save_workflow,
             delete_step,
             open_vault,
+            pick_workflows,
             companion_token
         ])
         .setup(|app| {
@@ -285,6 +286,31 @@ fn save_workflow(
 #[tauri::command]
 fn open_vault() -> Result<(), String> {
     open_vault_folder()
+}
+
+#[tauri::command]
+fn pick_workflows() -> Result<Vec<VaultWorkflowSummary>, String> {
+    let dir = vault_workflows_dir();
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let Some(paths) = rfd::FileDialog::new()
+        .set_title("Open Marouba workflows")
+        .set_directory(&dir)
+        .add_filter("Marouba workflows", &["md"])
+        .pick_files()
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut workflows = Vec::new();
+    for path in paths {
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(workflow) = workflow_summary_from_path(path) {
+            workflows.push(workflow);
+        }
+    }
+    Ok(workflows)
 }
 
 #[tauri::command]
@@ -725,28 +751,31 @@ fn list_saved_workflows() -> (Value, u16) {
         if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        let name = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("workflow")
-            .to_string();
-        workflows.push(VaultWorkflowSummary {
-            name,
-            size_kb: (metadata.len() + 1023) / 1024,
-            modified: metadata
-                .modified()
-                .ok()
-                .map(|modified| format_modified_time(&path, modified))
-                .unwrap_or_else(|| "unknown".to_string()),
-        });
+        if let Some(workflow) = workflow_summary_from_path(path) {
+            workflows.push(workflow);
+        }
     }
 
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     (json!(workflows), 200)
+}
+
+fn workflow_summary_from_path(path: PathBuf) -> Option<VaultWorkflowSummary> {
+    let metadata = std::fs::metadata(&path).ok()?;
+    let name = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("workflow")
+        .to_string();
+    Some(VaultWorkflowSummary {
+        name,
+        size_kb: (metadata.len() + 1023) / 1024,
+        modified: metadata
+            .modified()
+            .ok()
+            .map(|modified| format_modified_time(&path, modified))
+            .unwrap_or_else(|| "unknown".to_string()),
+    })
 }
 
 fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
