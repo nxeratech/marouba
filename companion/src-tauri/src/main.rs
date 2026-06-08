@@ -1516,7 +1516,7 @@ fn write_debug_log(msg: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(r"C:\Share\Marouba\companion\replay-debug.log")
+        .open(r"C:\Users\Public\marouba-replay-debug.log")
     {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
