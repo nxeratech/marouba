@@ -1,0 +1,224 @@
+{
+  "name": "Marouba Waitlist -> Google Sheets + Discord",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "marouba-waitlist",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2c117af7-647d-4e25-b586-0b363d1e5cf1",
+      "name": "Webhook",
+      "webhookId": "b119a7a9-f1c8-41fc-977d-00b228972e6f"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6a0cefe2-b4d1-4f35-b350-3edcd63fa66a",
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "9c26b705-11b6-4598-b345-5d3e28528544",
+              "name": "name",
+              "value": "={{ $json.body.name || $json.body.firstName || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "a0ff6ba4-4d9a-4984-a8f0-e80333f68bfa",
+              "name": "email",
+              "value": "={{ $json.body.email || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "efdd53f4-203d-4924-b6dc-8ef6a8ae6029",
+              "name": "app",
+              "value": "={{ $json.body.app || $json.body.appMostUsed || $json.body.mostUsedApp || $json.body['what app do you use most'] || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "18791492-dd01-4ec0-94d9-d9241c7ec27c",
+              "name": "source",
+              "value": "marouba.app",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        0
+      ],
+      "id": "36e34288-0a1b-4304-afd6-e7706d92c5b2",
+      "name": "Normalize Signup"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1BS2stOXkIHs9oBSpxIwFNothR0U4OtbFmYCTOvJxQ7A",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1BS2stOXkIHs9oBSpxIwFNothR0U4OtbFmYCTOvJxQ7A/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.timestamp }}",
+            "name": "={{ $json.name }}",
+            "email": "={{ $json.email }}",
+            "app": "={{ $json.app }}",
+            "source": "={{ $json.source }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "app",
+              "displayName": "app",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        520,
+        -100
+      ],
+      "id": "f99891e8-8eaf-4917-8f76-4a8c9d31bde4",
+      "name": "Append to Waitlist Sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "=New Marouba waitlist signup\nName: {{ $json.name }}\nEmail: {{ $json.email }}\nApp: {{ $json.app || 'Not specified' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        520,
+        120
+      ],
+      "id": "a9947ad8-a62f-4ea1-8491-5c3f216087ea",
+      "name": "Discord Notification",
+      "webhookId": "7425ca4e-d42c-4348-82d4-83067bc5efe2",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "myYoZEbokN95MTET",
+          "name": "Discord Webhook account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Signup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Signup": {
+      "main": [
+        [
+          {
+            "node": "Append to Waitlist Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Discord Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "source": "Marouba waitlist build",
+    "publicWebhookUrl": "https://webhook.nxeratech.ie/marouba-waitlist"
+  },
+  "pinData": {},
+  "tags": []
+}

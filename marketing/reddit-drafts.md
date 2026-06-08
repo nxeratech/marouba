@@ -10,7 +10,7 @@
 
 The current wave of computer-use agents (Claude Computer Use, Operator, etc.) share a fundamental limitation: they have no persistent memory of workflows. Every session is stateless. Every task is re-learned from scratch. This isn't just inefficient — it means agents can't accumulate reliability over time.
 
-We've been working on Marouba, an open-source workflow memory engine that sits between the agent and the OS. The core idea: **structured memory is more useful than larger context windows for repetitive tasks.**
+We've been working on **Marouba**, an open-source workflow memory engine. Tagline: **Teach once. Replay forever.** The core idea: structured memory is more useful than larger context windows for repetitive tasks.
 
 **The approach:**
 
@@ -44,6 +44,8 @@ Questions we're actively thinking about:
 
 Happy to go deeper on any of this. We think structured workflow memory is an under-explored area in agent research and we'd love to hear what others are working on.
 
+Waitlist: **marouba.app** | X: **@marouba_app** | Open source, MIT license
+
 ---
 
 ## r/artificial
@@ -58,7 +60,7 @@ I think the reason is memory. Not RAM — *memory*. The kind where you teach you
 
 Right now every AI agent session starts from zero. You can teach Claude or ChatGPT to navigate your accounting software, export a report, email it to your accountant. Tomorrow you ask it to do the same thing and it has to re-learn the entire flow. If a button moved in an update, it's completely lost.
 
-We're building Marouba to fix this. It's an open-source workflow memory engine. The idea is simple:
+We're building Marouba to fix this. It's an open-source workflow memory engine. **Teach once. Replay forever.** The idea is simple:
 
 1. **Teach once.** Show the agent what you want. It records the workflow in a structured format we call a vault.
 2. **Replay forever.** The vault stores not just the clicks, but the intent behind them. "I want to export this report as PDF" not "click at coordinates (340, 290)."
@@ -67,7 +69,7 @@ We're building Marouba to fix this. It's an open-source workflow memory engine. 
 
 The frontier labs are investing billions in making models smarter. We think there's equal value in making agents remember what they already know. A model that's 90% as smart but has perfect memory of your workflows is more useful than a model that's 100% smart but forgets everything between sessions.
 
-We're pre-launch, open source (MIT), building the waitlist at marouba.app. Would love to hear from anyone else thinking about this problem.
+We're pre-launch, open source (MIT), building the waitlist at **marouba.app**. Follow along at **@marouba_app**. Would love to hear from anyone else thinking about this problem.
 
 ---
 
@@ -79,7 +81,7 @@ We're pre-launch, open source (MIT), building the waitlist at marouba.app. Would
 
 ComfyUI users know the pain: you build a perfect workflow, everything works, you save it. Then ComfyUI updates. Or you get a new custom node. Or you try to share your workflow with someone who has a different node setup. It breaks. You debug. You rebuild.
 
-We're working on Marouba — an open-source workflow memory engine. The concept translates directly to what ComfyUI users already do:
+We're working on **Marouba** — an open-source workflow memory engine. **Teach once. Replay forever.** The concept translates directly to what ComfyUI users already do:
 
 **The problem:** Workflows are fragile. They depend on specific node versions, specific model paths, specific parameter values. Share a workflow JSON and there's a 50/50 chance it works on someone else's machine.
 
@@ -93,7 +95,7 @@ We're working on Marouba — an open-source workflow memory engine. The concept 
 
 If you've ever spent an hour debugging someone else's workflow JSON, you understand the problem. We'd love input from ComfyUI power users on what the vault format should capture for image generation workflows specifically.
 
-Waitlist and details at marouba.app. Open source, MIT license.
+Waitlist and details at **marouba.app**. Follow progress at **@marouba_app**. Open source, MIT license.
 
 ---
 
@@ -107,7 +109,7 @@ Every Ableton producer has workflows they repeat constantly: specific routing se
 
 But when Ableton updates, or you move to a different machine, or you try to explain your workflow to a collaborator — you're starting from scratch. Screenshots, screen recordings, "click here then here then here." It's 2026 and we're still teaching computers the same task hundreds of times.
 
-We're building Marouba — an open-source workflow memory engine. For music production, here's what that means:
+We're building **Marouba** — an open-source workflow memory engine. **Teach once. Replay forever.** For music production, here's what that means:
 
 **Teach once.** Perform your workflow in Ableton — set up your drum bus, route your sends, configure your mastering chain. Marouba watches and records the workflow in a structured format called a vault. Not a macro. Not a script. A complete description of intent and actions.
 
@@ -121,4 +123,4 @@ We're building Marouba — an open-source workflow memory engine. For music prod
 
 We're early stage, open source (MIT). The core engine works on desktop apps; Ableton-specific integration is on the roadmap. If you're a producer who's frustrated by repetitive setup work, we'd love your input on what workflows matter most.
 
-Waitlist at marouba.app.
+Waitlist at **marouba.app**. Follow along at **@marouba_app**.

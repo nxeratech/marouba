@@ -50,10 +50,13 @@ let reviewWasVisible = false;
 let apiToken: string | null = null;
 let workflows: VaultWorkflow[] = [];
 let selectedWorkflow: VaultWorkflow | null = null;
+let isSavingWorkflow = false;
 
 recordButton.addEventListener("click", async () => {
   savedStatus = null;
   message.textContent = "";
+  resetWorkflowName();
+  reviewWasVisible = false;
   await invoke("start_recording");
   await refresh();
 });
@@ -116,15 +119,19 @@ workflowName.addEventListener("input", () => {
 });
 
 saveButton.addEventListener("click", async () => {
-  if (!workflowName.value.trim()) {
+  const name = workflowName.value.trim();
+  if (!name) {
     showNameRequired();
+    return;
+  }
+  if (isSavingWorkflow) {
     return;
   }
   const keepIndexes = Array.from(steps.querySelectorAll<HTMLInputElement>("input[data-index]"))
     .filter((input) => input.checked)
     .map((input) => Number(input.dataset.index));
-  const name = workflowName.value.trim();
-  saveButton.disabled = true;
+  isSavingWorkflow = true;
+  updateSaveState();
   message.textContent = "Saving workflow...";
   try {
     const path = await invoke<string>("save_workflow", {
@@ -132,10 +139,12 @@ saveButton.addEventListener("click", async () => {
     });
     savedStatus = `Saved: ${name}`;
     message.textContent = path;
+    resetWorkflowName();
     await refresh();
   } catch (error) {
     message.textContent = String(error);
   } finally {
+    isSavingWorkflow = false;
     updateSaveState();
   }
 });
@@ -310,13 +319,19 @@ function render(status: RecordingStatus) {
 
 function updateSaveState() {
   const hasName = workflowName.value.trim().length > 0;
-  if (!saveButton.disabled) {
-    saveButton.setAttribute("aria-disabled", hasName ? "false" : "true");
-  }
+  saveButton.disabled = isSavingWorkflow;
+  saveButton.setAttribute("aria-disabled", hasName && !isSavingWorkflow ? "false" : "true");
   if (hasName) {
     nameHint.hidden = true;
     workflowName.classList.remove("invalid");
   }
+}
+
+function resetWorkflowName() {
+  workflowName.value = "";
+  nameHint.hidden = true;
+  workflowName.classList.remove("invalid", "shake");
+  updateSaveState();
 }
 
 function showNameRequired() {

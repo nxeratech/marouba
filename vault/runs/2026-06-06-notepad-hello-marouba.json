@@ -1,0 +1,34 @@
+{
+  "logged_at": "2026-06-06T18:59:03.025744+00:00",
+  "result": {
+    "route_type": "sequence",
+    "steps": [
+      {
+        "duration_ms": 2511,
+        "error": null,
+        "output": null,
+        "route_type": "cli",
+        "source": "self_taught",
+        "success": true
+      },
+      {
+        "duration_ms": 1691,
+        "error": null,
+        "output": null,
+        "route_type": "keyboard",
+        "source": "self_taught",
+        "success": true
+      },
+      {
+        "duration_ms": 1601,
+        "error": null,
+        "output": null,
+        "route_type": "shortcut",
+        "source": "self_taught",
+        "success": true
+      }
+    ],
+    "success": true
+  },
+  "workflow_id": "notepad-hello-marouba"
+}

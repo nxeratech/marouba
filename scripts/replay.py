@@ -32,6 +32,9 @@ def replay_workflow(
 
     router = router or Router()
     executor = executor or Executor(root)
+    if workflow.get("mode") == "sequence":
+        return replay_sequence(workflow, params, root, vault, executor)
+
     gesture_routes = [route for route in workflow.get("routes", []) if route.get("type") == "gesture"]
     if gesture_routes:
         result = executor._execute_gesture(gesture_routes[0], params)
@@ -40,7 +43,6 @@ def replay_workflow(
 
     routes = router.route_order(workflow)
     print(f"[Marouba] Route order: {', '.join(route['type'] for route in routes)}")
-
     failures = []
     for route in routes:
         route_type = route["type"]
@@ -79,6 +81,31 @@ def replay_workflow(
         print("[Marouba] Phase 1b repair complete.")
         return 0
     return 1
+
+
+def replay_sequence(workflow: dict, params: dict, root: Path, vault: Vault, executor: Executor) -> int:
+    routes = [route for route in workflow.get("routes", []) if route.get("type") != "ask"]
+    print(f"[Marouba] Sequence steps: {', '.join(route['type'] for route in routes)}")
+    if not routes:
+        print("[Marouba] Sequence workflow has no executable routes.", file=sys.stderr)
+        return 1
+
+    results = []
+    for index, route in enumerate(routes, start=1):
+        route_type = route["type"]
+        print(f"[Marouba] Step {index}/{len(routes)}: {route_type}")
+        result = executor.execute(route, params, workflow)
+        results.append(result)
+        if not result["success"]:
+            print(f"[Marouba] Step failed: {route_type}: {result['error']}", file=sys.stderr)
+            vault.log_run(workflow, {"success": False, "route_type": "sequence", "steps": results})
+            return 1
+
+    final_result = {"success": True, "route_type": "sequence", "steps": results}
+    log_path = vault.log_run(workflow, final_result)
+    print(f"[Marouba] Run logged to {log_path.relative_to(root)}")
+    print("[Marouba] Replay complete.")
+    return 0
 
 
 def main() -> int:

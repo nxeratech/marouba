@@ -1,0 +1,26 @@
+{
+  "logged_at": "2026-06-06T19:37:49.284933+00:00",
+  "result": {
+    "route_type": "sequence",
+    "steps": [
+      {
+        "duration_ms": 1687,
+        "error": null,
+        "output": null,
+        "route_type": "shortcut",
+        "source": "self_taught",
+        "success": true
+      },
+      {
+        "duration_ms": 3041,
+        "error": null,
+        "output": null,
+        "route_type": "keyboard",
+        "source": "self_taught",
+        "success": true
+      }
+    ],
+    "success": true
+  },
+  "workflow_id": "ableton-save-live-set-smoke"
+}

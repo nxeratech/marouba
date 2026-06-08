@@ -1323,92 +1323,29 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
-    // BlockInput removed — caused system lockout on replay failure.
-    write_debug_log(&format!("replay_mouse called, events count: {}", payload.events.len()));
+    let replay_rect = active_window_rect();
     let mut replayed = 0usize;
-    let mut skipped_colour_mouseup = false;
     let mut skipped_toolbar_mousedown = false;
-    let replay_rect = match resolve_target_replay_rect(&payload) {
-        Ok(rect) => rect,
-        Err(error) => {
-            return (
-                json!({
-                    "ok": false,
-                    "replayed": replayed,
-                    "target_window": payload.target_window,
-                    "error": error
-                }),
-                500,
-            );
-        }
-    };
-    for event in payload.events.iter().filter(|event| {
-        matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
+    for event in payload.events.iter().filter(|e| {
+        matches!(e.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
         if event.kind == "mousemove" && normalized_event_outside_window(event) {
-            write_debug_log(&format!(
-                "skipped out-of-bounds event: {} {:?} {:?}",
-                event.kind, event.normalized_x, event.normalized_y
-            ));
-            continue;
-        }
-        if skipped_colour_mouseup && event.kind == "mouseup" {
-            skipped_colour_mouseup = false;
             continue;
         }
         if skipped_toolbar_mousedown && event.kind == "mouseup" {
             skipped_toolbar_mousedown = false;
-            write_debug_log("skipped mouseup paired with toolbar/ribbon mousedown");
             continue;
         }
-        if is_colour_select_event(event) {
-            if let Some(colour_hex) = event.colour_hex.as_deref() {
-                write_debug_log(&format!("colour_select: hex={colour_hex}"));
-                match replay_ms_paint_colour_select(colour_hex) {
-                    Ok(()) => {
-                        skipped_colour_mouseup = true;
-                        replayed += 1;
-                        continue;
-                    }
-                    Err(error) => {
-                        write_debug_log(&format!(
-                            "colour_select failed, falling back to raw click: {error}"
-                        ));
-                    }
-                }
-            }
-        }
-        // Paint toolbar/ribbon cutoff: normalized_y < 0.20 is UI chrome, not canvas.
-        if matches!(event.kind.as_str(), "mousedown" | "mousemove")
-            && event.normalized_y.map(|value| value < 0.20).unwrap_or(false)
+        if event.kind == "mousedown"
+            && event.normalized_y.map(|y| y < 0.15).unwrap_or(false)
         {
-            if event.kind == "mousedown" {
-                skipped_toolbar_mousedown = true;
-            }
-            write_debug_log(&format!(
-                "skipped toolbar/ribbon event: {} {:?} {:?}",
-                event.kind, event.normalized_x, event.normalized_y
-            ));
+            skipped_toolbar_mousedown = true;
             continue;
         }
         if event.kind == "mouseup" {
             skipped_toolbar_mousedown = false;
         }
-        let Some((x, y)) = resolve_replay_point(event, Some(&replay_rect)) else {
-            write_debug_log(&format!(
-                "skipped event with missing normalized coords: {} raw=({:?}, {:?})",
-                event.kind, event.x, event.y
-            ));
-            continue;
-        };
-        write_debug_log(&format!(
-            "event: {} {:?} {:?} -> screen {},{}",
-            event.kind,
-            event.normalized_x,
-            event.normalized_y,
-            x,
-            y
-        ));
+        let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
         unsafe {
             let _ = SetCursorPos(x, y);
             match (event.kind.as_str(), event.button.as_deref().unwrap_or("left")) {
@@ -1431,14 +1368,13 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     (json!({"ok": false, "replayed": 0, "target_window": payload.target_window, "error": "mouse replay not implemented on this platform"}), 501)
 }
 
-fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> Option<(i32, i32)> {
-    let replay_rect = rect.or(event.window_rect.as_ref());
-    if let (Some(rect), Some(nx), Some(ny)) = (replay_rect, event.normalized_x, event.normalized_y) {
-        let x = rect.left + (nx.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
-        let y = rect.top + (ny.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
-        return Some((x, y));
+fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i32, i32) {
+    if let (Some(rect), Some(nx), Some(ny)) = (rect, event.normalized_x, event.normalized_y) {
+        let x = rect.left + (nx * rect.width as f64).round() as i32;
+        let y = rect.top + (ny * rect.height as f64).round() as i32;
+        return (x, y);
     }
-    None
+    (event.x.unwrap_or(0), event.y.unwrap_or(0))
 }
 
 fn is_colour_select_event(event: &RecordedEvent) -> bool {

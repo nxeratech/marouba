@@ -1,4 +1,4 @@
-# Show HN: Marouba – open source workflow memory engine that teaches your computer once and repairs itself
+# Show HN: Marouba – open source workflow memory engine (Teach once. Replay forever.)
 
 ---
 
@@ -6,7 +6,7 @@ Every time your computer updates, moves a button, renames a menu — your automa
 
 That's the problem. The frontier labs are building agents that can *use* computers, but none of them remember what they learned. Every session starts from zero. Every workflow is ephemeral. Every broken step is a human in the loop.
 
-Marouba is an open-source workflow memory engine. It sits between you and your OS, watches what you do, stores it in a structured format called a **vault**, and replays it later. When something breaks — and it will — Marouba detects the failure, repairs the workflow using its own stored context, and keeps going. It doesn't ask you again.
+Marouba is an open-source workflow memory engine. It sits between you and your OS, watches what you do, stores it in a structured format called a **vault**, and replays it later. When something breaks — and it will — Marouba detects the failure, repairs the workflow using its own stored context, and keeps going. It doesn't ask you again. Teach once. Replay forever.
 
 ## How it works
 
@@ -48,4 +48,4 @@ We think the missing piece isn't better models. It's memory. Structured, repaira
 
 We're looking for people who are frustrated with teaching the same task to their computer over and over. If that's you, we'd love your feedback.
 
-The repo will be public at launch. For now, the waitlist is at marouba.app.
+The repo will be public at launch. For now, the waitlist is at **marouba.app** and we're on X at **@marouba_app**.

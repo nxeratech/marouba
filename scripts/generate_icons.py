@@ -12,6 +12,7 @@ ICON_SPECS = {
     "128x128.png": (128, 128),
     "128x128@2x.png": (256, 256),
 }
+ICO_SIZES = [(32, 32), (128, 128), (256, 256)]
 ICON_COLOR = (123, 47, 190, 255)
 
 
@@ -23,6 +24,9 @@ def generate_icons(root: Path = ROOT) -> None:
             image = Image.new("RGBA", size, ICON_COLOR)
             image.save(icon_dir / filename)
             print(f"[Marouba] wrote {icon_dir / filename}")
+        ico_image = Image.new("RGBA", (256, 256), ICON_COLOR)
+        ico_image.save(icon_dir / "icon.ico", sizes=ICO_SIZES)
+        print(f"[Marouba] wrote {icon_dir / 'icon.ico'}")
 
 
 if __name__ == "__main__":

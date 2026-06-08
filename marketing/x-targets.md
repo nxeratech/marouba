@@ -1,6 +1,7 @@
 # X/Twitter Target List — Marouba
 
 > 20 people actively talking about AI computer use, human creativity + AI, recursive improvement, workflow automation
+> Account: **@marouba_app** | Site: **marouba.app** | Tagline: **Teach once. Replay forever.**
 > Built June 2026 — refresh quarterly
 
 ---
@@ -9,7 +10,7 @@
 
 ### 1. Andrej Karpathy — @karpathy
 - **What they talk about:** Software 2.0/3.0, vibe coding, AI-native education, how humans create with AI
-- **Why Marouba is relevant:** He's the original "AI should learn from demonstration" voice. Marouba's teach-once-replay-forever model aligns exactly with his thesis on how software development is changing. His audience is the exact HN crossover.
+- **Why Marouba is relevant:** He's the original "AI should learn from demonstration" voice. Marouba's "Teach once. Replay forever." model aligns exactly with his thesis on how software development is changing. His audience is the exact HN crossover.
 - **Engagement angle:** Reply to his posts about AI learning curves with a concrete example of workflow memory reducing friction
 
 ### 2. Simon Willison — @simonw
@@ -34,7 +35,7 @@
 
 ### 6. AI Jason — @AIJasonL
 - **What they talk about:** Building products with AI agents, creator economy + AI, practical tutorials
-- **Why Marouba is relevant:** His audience is indie builders who teach AI to do tasks. Marouba is literally "teach once, use forever" — the exact value prop his followers need.
+- **Why Marouba is relevant:** His audience is indie builders who teach AI to do tasks. Marouba is "Teach once. Replay forever." — the exact value prop his followers need.
 - **Engagement angle:** The marketplace angle — workflow knowledge as a creator economy asset
 
 ---
@@ -102,7 +103,7 @@
 
 ### 18. Nicole Lecher — @natalieLecher
 - **What they talk about:** AI tools for regular people, creative AI, consumer AI products
-- **Why Marouba is relevant:** Press coverage. She covers AI tools that normal people use. Marouba's "teach your computer once" framing is consumer-friendly.
+- **Why Marouba is relevant:** Press coverage. She covers AI tools that normal people use. Marouba's "Teach once. Replay forever." framing is consumer-friendly.
 - **Engagement angle:** Product demo when marketplace is live
 
 ### 19. Sam Witteveen — @sam_witteveen
@@ -123,13 +124,16 @@
 - Reply to Tier 1 posts with genuine insights, no links, no mentions of Marouba
 - Build rapport through technical contributions to their conversations
 - Share vault schema snippets as standalone "interesting pattern" posts
+- Follow and engage from **@marouba_app** — like, reply, build presence before the announce
 
 ### Launch day
-- Post demo clip showing teach → replay → break → repair in one take
+- Post demo clip from **@marouba_app** showing teach → replay → break → repair in one take
 - @ mention Tier 1 with a specific reason it's relevant to *their* audience
 - Quote-tweet any recent posts about computer use fragility
+- Pin a launch tweet: "Marouba — Teach once. Replay forever. Open-source workflow memory engine. marouba.app"
 
 ### Post-launch
 - 30-minute response window for anyone who engages
 - DM Tier 1 with vault examples relevant to their specific workflows
 - Follow up with Tier 2 based on who amplifies
+- Cross-post to **marouba.app** waitlist — track conversion from each X mention
