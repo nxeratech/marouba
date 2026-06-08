@@ -37,9 +37,9 @@ use windows::Win32::UI::Accessibility::{
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON,
     VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
@@ -47,7 +47,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SendMessageW, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL, WM_SETFOCUS,
+    IsWindowVisible, PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow,
+    SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP, WM_SETFOCUS,
 };
 
 #[derive(Clone, Debug)]
@@ -1347,6 +1348,13 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     for event in payload.events.iter().filter(|event| {
         matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
+        if normalized_event_outside_window(event) {
+            write_debug_log(&format!(
+                "skipped out-of-bounds event: {} {:?} {:?}",
+                event.kind, event.normalized_x, event.normalized_y
+            ));
+            continue;
+        }
         if skipped_colour_mouseup && event.kind == "mouseup" {
             skipped_colour_mouseup = false;
             continue;
@@ -1457,6 +1465,17 @@ fn replay_payload_targets_ms_paint(payload: &MouseReplayRequest) -> bool {
         || payload.events.iter().any(is_ms_paint_event)
 }
 
+fn normalized_event_outside_window(event: &RecordedEvent) -> bool {
+    event
+        .normalized_x
+        .map(|value| !(0.0..=1.0).contains(&value))
+        .unwrap_or(false)
+        || event
+            .normalized_y
+            .map(|value| !(0.0..=1.0).contains(&value))
+            .unwrap_or(false)
+}
+
 fn first_valid_event_window_title(events: &[RecordedEvent]) -> Option<String> {
     events
         .iter()
@@ -1560,17 +1579,30 @@ fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRe
         let _ = SendMessageW(hwnd, WM_SETFOCUS, WPARAM(0), LPARAM(0));
     }
     write_debug_log("WM_SETFOCUS sent");
+    thread::sleep(Duration::from_millis(500));
+    send_key(VK_ESCAPE)?;
+    write_debug_log("sent key: VK_ESCAPE");
     thread::sleep(Duration::from_millis(300));
     send_key(VK_ESCAPE)?;
     write_debug_log("sent key: VK_ESCAPE");
-    thread::sleep(Duration::from_millis(200));
-    send_key(VK_ESCAPE)?;
-    write_debug_log("sent key: VK_ESCAPE");
-    thread::sleep(Duration::from_millis(200));
-    let (click_x, click_y) = click_window_normalized(&rect, 0.168, 0.138, "Paint pencil tool")?;
-    write_debug_log(&format!("canvas click sent at {click_x},{click_y}"));
+    thread::sleep(Duration::from_millis(300));
+    post_key_to_window(hwnd, VIRTUAL_KEY(0x50), "P")?;
+    thread::sleep(Duration::from_millis(500));
+    post_key_to_window(hwnd, VK_ESCAPE, "VK_ESCAPE")?;
     thread::sleep(Duration::from_millis(300));
     Ok(rect)
+}
+
+#[cfg(target_os = "windows")]
+fn post_key_to_window(hwnd: HWND, key: VIRTUAL_KEY, label: &str) -> Result<(), String> {
+    unsafe {
+        PostMessageW(hwnd, WM_KEYDOWN, WPARAM(key.0 as usize), LPARAM(0))
+            .map_err(|error| format!("failed to post WM_KEYDOWN {label}: {error}"))?;
+        PostMessageW(hwnd, WM_KEYUP, WPARAM(key.0 as usize), LPARAM(0))
+            .map_err(|error| format!("failed to post WM_KEYUP {label}: {error}"))?;
+    }
+    write_debug_log(&format!("posted key: {label}"));
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1622,17 +1654,6 @@ fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
             None
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn click_window_normalized(rect: &WindowRect, normalized_x: f64, normalized_y: f64, label: &str) -> Result<(i32, i32), String> {
-    let x = rect.left + (normalized_x.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
-    let y = rect.top + (normalized_y.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
-    unsafe {
-        SetCursorPos(x, y).map_err(|error| format!("failed to move cursor to {label}: {error}"))?;
-    }
-    send_mouse_click()?;
-    Ok((x, y))
 }
 
 #[cfg(target_os = "windows")]
@@ -1704,42 +1725,6 @@ fn send_key_down(key: VIRTUAL_KEY) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn send_key_up(key: VIRTUAL_KEY) -> Result<(), String> {
     send_keyboard_input(key, KEYEVENTF_KEYUP)
-}
-
-#[cfg(target_os = "windows")]
-fn send_mouse_click() -> Result<(), String> {
-    let down = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
-                mouseData: 0,
-                dwFlags: MOUSEEVENTF_LEFTDOWN,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let up = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
-                mouseData: 0,
-                dwFlags: MOUSEEVENTF_LEFTUP,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let sent = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
-    if sent == 2 {
-        Ok(())
-    } else {
-        Err("SendInput failed while clicking Paint canvas center".to_string())
-    }
 }
 
 #[cfg(target_os = "windows")]
