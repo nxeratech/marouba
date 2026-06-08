@@ -1324,32 +1324,39 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     // BlockInput removed — caused system lockout on replay failure.
-    let mut replay_rect = active_window_rect();
     write_debug_log(&format!("replay_mouse called, events count: {}", payload.events.len()));
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
-    if replay_payload_targets_ms_paint(&payload) {
-        match prepare_ms_paint_replay_tool(&payload) {
-            Ok(rect) => replay_rect = Some(rect),
-            Err(error) => {
-                return (
-                    json!({
-                        "ok": false,
-                        "replayed": replayed,
-                        "target_window": payload.target_window,
-                        "error": error
-                    }),
-                    500,
-                );
-            }
+    let replay_rect = match resolve_target_replay_rect(&payload) {
+        Ok(rect) => rect,
+        Err(error) => {
+            return (
+                json!({
+                    "ok": false,
+                    "replayed": replayed,
+                    "target_window": payload.target_window,
+                    "error": error
+                }),
+                500,
+            );
         }
-    }
+    };
     for event in payload.events.iter().filter(|event| {
         matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
         if event.kind == "mousemove" && normalized_event_outside_window(event) {
             write_debug_log(&format!(
                 "skipped out-of-bounds event: {} {:?} {:?}",
+                event.kind, event.normalized_x, event.normalized_y
+            ));
+            continue;
+        }
+        if matches!(event.kind.as_str(), "mousedown" | "mousemove")
+            && event.normalized_y.map(|value| value < 0.15).unwrap_or(false)
+            && !is_colour_select_event(event)
+        {
+            write_debug_log(&format!(
+                "skipped toolbar/ribbon event: {} {:?} {:?}",
                 event.kind, event.normalized_x, event.normalized_y
             ));
             continue;
@@ -1375,7 +1382,13 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                 }
             }
         }
-        let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
+        let Some((x, y)) = resolve_replay_point(event, Some(&replay_rect)) else {
+            write_debug_log(&format!(
+                "skipped event with missing normalized coords: {} raw=({:?}, {:?})",
+                event.kind, event.x, event.y
+            ));
+            continue;
+        };
         write_debug_log(&format!(
             "event: {} {:?} {:?} -> screen {},{}",
             event.kind,
@@ -1406,14 +1419,14 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     (json!({"ok": false, "replayed": 0, "target_window": payload.target_window, "error": "mouse replay not implemented on this platform"}), 501)
 }
 
-fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i32, i32) {
+fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> Option<(i32, i32)> {
     let replay_rect = rect.or(event.window_rect.as_ref());
     if let (Some(rect), Some(nx), Some(ny)) = (replay_rect, event.normalized_x, event.normalized_y) {
         let x = rect.left + (nx.clamp(0.0, 1.0) * rect.width as f64).round() as i32;
         let y = rect.top + (ny.clamp(0.0, 1.0) * rect.height as f64).round() as i32;
-        return (x, y);
+        return Some((x, y));
     }
-    (event.x.unwrap_or(0), event.y.unwrap_or(0))
+    None
 }
 
 fn is_colour_select_event(event: &RecordedEvent) -> bool {
@@ -1467,6 +1480,22 @@ fn normalized_event_outside_window(event: &RecordedEvent) -> bool {
             .normalized_y
             .map(|value| !(0.0..=1.0).contains(&value))
             .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_target_replay_rect(payload: &MouseReplayRequest) -> Result<WindowRect, String> {
+    if replay_payload_targets_ms_paint(payload) {
+        return prepare_ms_paint_replay_tool(payload);
+    }
+    let title = payload
+        .target_window
+        .clone()
+        .or_else(|| first_valid_event_window_title(&payload.events))
+        .ok_or_else(|| "gesture replay needs a target window title".to_string())?;
+    let hwnd = find_window_containing(&title)
+        .ok_or_else(|| format!("no visible top-level window contains '{title}'"))?;
+    window_rect_for_hwnd(hwnd)
+        .ok_or_else(|| format!("failed to get window rect for '{title}'"))
 }
 
 fn first_valid_event_window_title(events: &[RecordedEvent]) -> Option<String> {
