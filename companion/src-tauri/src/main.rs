@@ -20,7 +20,7 @@ use windows::core::PCWSTR;
 #[cfg(target_os = "windows")]
 use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, WPARAM};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -37,16 +37,17 @@ use windows::Win32::UI::Accessibility::{
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, BlockInput, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
+    INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON,
+    VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
+    IsWindowVisible, SendMessageW, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL, WM_SETFOCUS,
 };
 
 #[derive(Clone, Debug)]
@@ -1296,20 +1297,23 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let _input_guard = InputBlockGuard::new();
-    let replay_rect = active_window_rect();
+    let mut replay_rect = active_window_rect();
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
     if replay_payload_targets_ms_paint(&payload) {
-        if let Err(error) = prepare_ms_paint_replay_tool() {
-            return (
-                json!({
-                    "ok": false,
-                    "replayed": replayed,
-                    "target_window": payload.target_window,
-                    "error": error
-                }),
-                500,
-            );
+        match prepare_ms_paint_replay_tool(&payload) {
+            Ok(rect) => replay_rect = Some(rect),
+            Err(error) => {
+                return (
+                    json!({
+                        "ok": false,
+                        "replayed": replayed,
+                        "target_window": payload.target_window,
+                        "error": error
+                    }),
+                    500,
+                );
+            }
         }
     }
     for event in payload.events.iter().filter(|event| {
@@ -1474,14 +1478,75 @@ fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn prepare_ms_paint_replay_tool() -> Result<(), String> {
+fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRect, String> {
+    let (hwnd, rect) = find_paint_window(payload)
+        .ok_or_else(|| "Could not find MS Paint window for replay prelude".to_string())?;
+    unsafe {
+        let _ = SendMessageW(hwnd, WM_SETFOCUS, WPARAM(0), LPARAM(0));
+    }
+    thread::sleep(Duration::from_millis(300));
     send_key(VK_ESCAPE)?;
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(150));
     send_key(VIRTUAL_KEY(0x50))?;
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(150));
     send_key(VK_ESCAPE)?;
+    thread::sleep(Duration::from_millis(150));
+    click_window_center(&rect)?;
     thread::sleep(Duration::from_millis(200));
-    Ok(())
+    Ok(rect)
+}
+
+#[cfg(target_os = "windows")]
+fn find_paint_window(payload: &MouseReplayRequest) -> Option<(HWND, WindowRect)> {
+    let mut candidates = Vec::new();
+    if let Some(target) = payload.target_window.as_deref().filter(|value| title_is_ms_paint(value)) {
+        candidates.push(target.to_string());
+    }
+    for event in &payload.events {
+        if let Some(title) = event.window_title.as_deref().filter(|value| title_is_ms_paint(value)) {
+            if !candidates.iter().any(|candidate| candidate.eq_ignore_ascii_case(title)) {
+                candidates.push(title.to_string());
+            }
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push("paint".to_string());
+    }
+    for candidate in candidates {
+        if let Some(hwnd) = find_window_containing(&candidate) {
+            if let Some(rect) = window_rect_for_hwnd(hwnd) {
+                return Some((hwnd, rect));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_ok() {
+            Some(WindowRect {
+                left: rect.left,
+                top: rect.top,
+                width: rect.right - rect.left,
+                height: rect.bottom - rect.top,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn click_window_center(rect: &WindowRect) -> Result<(), String> {
+    let x = rect.left + (0.5 * rect.width as f64).round() as i32;
+    let y = rect.top + (0.5 * rect.height as f64).round() as i32;
+    unsafe {
+        SetCursorPos(x, y).map_err(|error| format!("failed to move cursor to Paint canvas center: {error}"))?;
+    }
+    send_mouse_click()
 }
 
 #[cfg(target_os = "windows")]
@@ -1553,6 +1618,42 @@ fn send_key_down(key: VIRTUAL_KEY) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn send_key_up(key: VIRTUAL_KEY) -> Result<(), String> {
     send_keyboard_input(key, KEYEVENTF_KEYUP)
+}
+
+#[cfg(target_os = "windows")]
+fn send_mouse_click() -> Result<(), String> {
+    let down = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTDOWN,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+    if sent == 2 {
+        Ok(())
+    } else {
+        Err("SendInput failed while clicking Paint canvas center".to_string())
+    }
 }
 
 #[cfg(target_os = "windows")]
