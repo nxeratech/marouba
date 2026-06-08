@@ -79,6 +79,7 @@ struct ScreenshotRequest {
 #[derive(Debug, Deserialize)]
 struct MouseReplayRequest {
     target_window: Option<String>,
+    workflow_app: Option<String>,
     events: Vec<RecordedEvent>,
 }
 
@@ -548,10 +549,28 @@ fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
         if !guard.recording {
             return;
         }
+        if is_empty_unknown_system_event(&event) {
+            return;
+        }
         let label = event_label(&event);
         guard.events.push(event);
         push_log(&mut guard, label);
     }
+}
+
+fn is_empty_unknown_system_event(event: &RecordedEvent) -> bool {
+    app_name_is_unknown_or_empty(event.app_name.as_deref())
+        && event
+            .window_title
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+}
+
+fn app_name_is_unknown_or_empty(value: Option<&str>) -> bool {
+    let value = value.unwrap_or("").trim();
+    value.is_empty() || value.eq_ignore_ascii_case("unknown")
 }
 
 fn should_record_mousemove(previous: Option<(i32, i32)>, x: i32, y: i32) -> bool {
@@ -590,6 +609,13 @@ fn mouse_event_record(
     current_app_name: &str,
 ) -> RecordedEvent {
     let rect = active_window_rect();
+    let app_name = if current_app_name.trim().is_empty()
+        || current_app_name.trim().eq_ignore_ascii_case("unknown")
+    {
+        app_name_from_title(&window.title)
+    } else {
+        current_app_name.to_string()
+    };
     let (normalized_x, normalized_y) = match rect.as_ref() {
         Some(rect) if rect.width > 0 && rect.height > 0 => (
             Some((x - rect.left) as f64 / rect.width as f64),
@@ -607,7 +633,7 @@ fn mouse_event_record(
         button,
         key: None,
         window_title: Some(window.title.clone()),
-        app_name: Some(current_app_name.to_string()),
+        app_name: Some(app_name),
         window_rect: rect,
         element_name: None,
         element_role: None,
@@ -867,6 +893,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         thread::sleep(Duration::from_millis(500));
         let (mut body, status) = replay_mouse(MouseReplayRequest {
             target_window: focused_window.clone(),
+            workflow_app: parse_workflow_app_name(&name),
             events,
         });
         if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -1418,7 +1445,25 @@ fn replay_payload_targets_ms_paint(payload: &MouseReplayRequest) -> bool {
         .as_deref()
         .map(title_is_ms_paint)
         .unwrap_or(false)
+        || payload
+            .workflow_app
+            .as_deref()
+            .map(title_is_ms_paint)
+            .unwrap_or(false)
+        || first_valid_event_window_title(&payload.events)
+            .as_deref()
+            .map(title_is_ms_paint)
+            .unwrap_or(false)
         || payload.events.iter().any(is_ms_paint_event)
+}
+
+fn first_valid_event_window_title(events: &[RecordedEvent]) -> Option<String> {
+    events
+        .iter()
+        .find(|event| !is_empty_unknown_system_event(event))
+        .and_then(|event| event.window_title.as_ref())
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty())
 }
 
 fn write_debug_log(msg: &str) {
@@ -1533,6 +1578,14 @@ fn find_paint_window(payload: &MouseReplayRequest) -> Option<(HWND, WindowRect)>
     let mut candidates = Vec::new();
     if let Some(target) = payload.target_window.as_deref().filter(|value| title_is_ms_paint(value)) {
         candidates.push(target.to_string());
+    }
+    if let Some(app) = payload.workflow_app.as_deref().filter(|value| title_is_ms_paint(value)) {
+        candidates.push(app.to_string());
+    }
+    if let Some(title) = first_valid_event_window_title(&payload.events)
+        .filter(|value| title_is_ms_paint(value))
+    {
+        candidates.push(title);
     }
     for event in &payload.events {
         if let Some(title) = event.window_title.as_deref().filter(|value| title_is_ms_paint(value)) {
@@ -2159,10 +2212,7 @@ fn fallback_metadata(name: &str, events: &[RecordedEvent]) -> WorkflowMetadata {
 fn write_workflow(name: &str, events: &[RecordedEvent], metadata: WorkflowMetadata) -> Result<PathBuf, String> {
     let id = slugify(name);
     let today = current_date_string();
-    let app = events
-        .iter()
-        .find_map(|event| event.window_title.clone())
-        .unwrap_or_else(|| "Windows".to_string());
+    let app = workflow_app_from_events(events);
     let events_json = serde_json::to_string_pretty(events).map_err(|error| error.to_string())?;
     let routes_json = format!(
         "[\n  {{\n    \"type\": \"gesture\",\n    \"events\": {},\n    \"target_window\": {}\n  }}\n]",
@@ -2205,6 +2255,24 @@ depends_on: []\n\
     let path = dir.join(format!("{id}.md"));
     std::fs::write(&path, body).map_err(|error| error.to_string())?;
     Ok(path)
+}
+
+fn workflow_app_from_events(events: &[RecordedEvent]) -> String {
+    for event in events.iter().filter(|event| !is_empty_unknown_system_event(event)) {
+        if let Some(app_name) = event.app_name.as_deref().map(str::trim) {
+            if !app_name.is_empty() && !app_name.eq_ignore_ascii_case("unknown") {
+                return app_name.to_string();
+            }
+        }
+    }
+    for event in events.iter().filter(|event| !is_empty_unknown_system_event(event)) {
+        if let Some(window_title) = event.window_title.as_deref().map(str::trim) {
+            if !window_title.is_empty() {
+                return window_title.to_string();
+            }
+        }
+    }
+    "Windows".to_string()
 }
 
 fn yaml_scalar(value: &str) -> String {
