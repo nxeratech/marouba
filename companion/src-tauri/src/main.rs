@@ -1327,6 +1327,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     write_debug_log(&format!("replay_mouse called, events count: {}", payload.events.len()));
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
+    let mut skipped_toolbar_mousedown = false;
     let replay_rect = match resolve_target_replay_rect(&payload) {
         Ok(rect) => rect,
         Err(error) => {
@@ -1355,6 +1356,11 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             skipped_colour_mouseup = false;
             continue;
         }
+        if skipped_toolbar_mousedown && event.kind == "mouseup" {
+            skipped_toolbar_mousedown = false;
+            write_debug_log("skipped mouseup paired with toolbar/ribbon mousedown");
+            continue;
+        }
         if is_colour_select_event(event) {
             if let Some(colour_hex) = event.colour_hex.as_deref() {
                 write_debug_log(&format!("colour_select: hex={colour_hex}"));
@@ -1376,11 +1382,17 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         if matches!(event.kind.as_str(), "mousedown" | "mousemove")
             && event.normalized_y.map(|value| value < 0.20).unwrap_or(false)
         {
+            if event.kind == "mousedown" {
+                skipped_toolbar_mousedown = true;
+            }
             write_debug_log(&format!(
                 "skipped toolbar/ribbon event: {} {:?} {:?}",
                 event.kind, event.normalized_x, event.normalized_y
             ));
             continue;
+        }
+        if event.kind == "mouseup" {
+            skipped_toolbar_mousedown = false;
         }
         let Some((x, y)) = resolve_replay_point(event, Some(&replay_rect)) else {
             write_debug_log(&format!(
