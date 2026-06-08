@@ -26,7 +26,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel,
+    ReleaseDC, SelectObject, SRCCOPY,
+};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree, UIA_NamePropertyId,
@@ -36,14 +39,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, BlockInput, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
+    VK_CONTROL, VK_HOME, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetDesktopWindow, GetForegroundWindow, GetWindowRect,
-    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
 };
 
 #[derive(Clone, Debug)]
@@ -1296,6 +1299,19 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let replay_rect = active_window_rect();
     let mut replayed = 0usize;
     let mut skipped_colour_mouseup = false;
+    if replay_payload_targets_ms_paint(&payload) {
+        if let Err(error) = prepare_ms_paint_replay_tool() {
+            return (
+                json!({
+                    "ok": false,
+                    "replayed": replayed,
+                    "target_window": payload.target_window,
+                    "error": error
+                }),
+                500,
+            );
+        }
+    }
     for event in payload.events.iter().filter(|event| {
         matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
@@ -1382,17 +1398,64 @@ fn title_is_ms_paint(value: &str) -> bool {
     value.to_ascii_lowercase().contains("paint")
 }
 
+fn replay_payload_targets_ms_paint(payload: &MouseReplayRequest) -> bool {
+    payload
+        .target_window
+        .as_deref()
+        .map(title_is_ms_paint)
+        .unwrap_or(false)
+        || payload.events.iter().any(is_ms_paint_event)
+}
+
 #[cfg(target_os = "windows")]
 fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
     unsafe {
-        let desktop = GetDesktopWindow();
-        let hdc = GetDC(desktop);
-        if hdc.0.is_null() {
-            eprintln!("[Marouba] GetDC(GetDesktopWindow()) returned null while sampling colour");
+        let screen_hwnd = HWND(std::ptr::null_mut());
+        let screen_dc = GetDC(screen_hwnd);
+        if screen_dc.0.is_null() {
+            eprintln!("[Marouba] GetDC(null HWND) returned null while sampling colour");
             return None;
         }
-        let colour = GetPixel(hdc, x, y);
-        let _ = ReleaseDC(desktop, hdc);
+
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.0.is_null() {
+            let _ = ReleaseDC(screen_hwnd, screen_dc);
+            eprintln!("[Marouba] CreateCompatibleDC failed while sampling colour");
+            return None;
+        }
+
+        let bitmap = CreateCompatibleBitmap(screen_dc, 1, 1);
+        if bitmap.0.is_null() {
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(screen_hwnd, screen_dc);
+            eprintln!("[Marouba] CreateCompatibleBitmap failed while sampling colour");
+            return None;
+        }
+
+        let old_object = SelectObject(mem_dc, bitmap);
+        if old_object.0.is_null() {
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(screen_hwnd, screen_dc);
+            eprintln!("[Marouba] SelectObject failed while sampling colour");
+            return None;
+        }
+
+        if BitBlt(mem_dc, 0, 0, 1, 1, screen_dc, x, y, SRCCOPY).is_err() {
+            let _ = SelectObject(mem_dc, old_object);
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(screen_hwnd, screen_dc);
+            eprintln!("[Marouba] BitBlt failed while sampling colour at ({x}, {y})");
+            return None;
+        }
+
+        let colour = GetPixel(mem_dc, 0, 0);
+        eprintln!("[Marouba] Raw COLORREF sampled at ({x}, {y}): 0x{:08X}", colour.0);
+        let _ = SelectObject(mem_dc, old_object);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(screen_hwnd, screen_dc);
         if colour.0 == 0xFFFF_FFFF {
             eprintln!("[Marouba] GetPixel returned CLR_INVALID at ({x}, {y})");
             return None;
@@ -1408,6 +1471,14 @@ fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
     None
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_ms_paint_replay_tool() -> Result<(), String> {
+    send_modified_key(VK_CONTROL, VK_HOME)?;
+    send_key(VIRTUAL_KEY(0x50))?;
+    thread::sleep(Duration::from_millis(200));
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
