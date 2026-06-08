@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
@@ -32,22 +32,24 @@ use windows::Win32::Graphics::Gdi::{
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree, UIA_NamePropertyId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
+    TreeScope_Subtree, UIA_InvokePatternId, UIA_NamePropertyId,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_RBUTTON,
-    VK_RETURN, VK_TAB,
+    mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU,
+    VK_RBUTTON, VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, SetWindowPos,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_SHOWNORMAL,
 };
 
 #[derive(Clone, Debug)]
@@ -430,9 +432,15 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
         }
 
         if let Some((x, y)) = cursor_position() {
+            #[cfg(target_os = "windows")]
+            let left = key_is_down(VK_LBUTTON.0 as i32);
+            #[cfg(not(target_os = "windows"))]
+            let left = false;
+
             if last_pos != Some((x, y)) {
                 last_pos = Some((x, y));
-                if should_record_mousemove(last_mousemove_pos, x, y) {
+                let mousemove_threshold = if left { 2.0 } else { 8.0 };
+                if should_record_mousemove(last_mousemove_pos, x, y, mousemove_threshold) {
                     last_mousemove_pos = Some((x, y));
                     push_event(
                         &state,
@@ -449,10 +457,6 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                 }
             }
 
-            #[cfg(target_os = "windows")]
-            let left = key_is_down(VK_LBUTTON.0 as i32);
-            #[cfg(not(target_os = "windows"))]
-            let left = false;
             if left != last_left {
                 last_left = left;
                 push_event(
@@ -541,7 +545,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
             );
         }
         last_keys = current_keys;
-        thread::sleep(Duration::from_millis(45));
+        let poll_interval_ms = if last_left { 10 } else { 45 };
+        thread::sleep(Duration::from_millis(poll_interval_ms));
     }
 }
 fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
@@ -573,13 +578,13 @@ fn app_name_is_unknown_or_empty(value: Option<&str>) -> bool {
     value.is_empty() || value.eq_ignore_ascii_case("unknown")
 }
 
-fn should_record_mousemove(previous: Option<(i32, i32)>, x: i32, y: i32) -> bool {
+fn should_record_mousemove(previous: Option<(i32, i32)>, x: i32, y: i32, threshold: f64) -> bool {
     match previous {
         None => true,
         Some((previous_x, previous_y)) => {
             let dx = (x - previous_x) as f64;
             let dy = (y - previous_y) as f64;
-            (dx * dx + dy * dy).sqrt() > 8.0
+            (dx * dx + dy * dy).sqrt() > threshold
         }
     }
 }
@@ -891,6 +896,16 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
             println!("[Marouba] Focused replay target window: {window_title}");
         }
         thread::sleep(Duration::from_millis(500));
+        if let Some(window_title) = focused_window.as_deref() {
+            let (sender, receiver) = mpsc::channel();
+            let window_title = window_title.to_string();
+            let selection_events = events.clone();
+            thread::spawn(move || {
+                select_paint_pencil_for_replay(&window_title, &selection_events);
+                let _ = sender.send(());
+            });
+            let _ = receiver.recv_timeout(Duration::from_millis(800));
+        }
         let (mut body, status) = replay_mouse(MouseReplayRequest {
             target_window: focused_window.clone(),
             workflow_app: parse_workflow_app_name(&name),
@@ -1033,6 +1048,148 @@ fn focus_first_available_window(candidates: &[String]) -> Result<String, String>
         "window focus is not implemented on this platform; tried {}",
         candidates.join(", ")
     ))
+}
+
+#[cfg(target_os = "windows")]
+fn select_paint_pencil_for_replay(window_title: &str, events: &[RecordedEvent]) {
+    if !title_is_ms_paint(window_title) {
+        return;
+    }
+    let Some(hwnd) = find_window_containing(window_title) else {
+        return;
+    };
+
+    if invoke_paint_pencil_via_uia(hwnd).is_ok() {
+        thread::sleep(Duration::from_millis(300));
+        return;
+    }
+
+    if replay_recorded_pencil_toolbar_click(events) {
+        thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn select_paint_pencil_for_replay(_: &str, _: &[RecordedEvent]) {}
+
+#[cfg(target_os = "windows")]
+fn invoke_paint_pencil_via_uia(hwnd: HWND) -> Result<(), String> {
+    unsafe {
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        let root = automation
+            .ElementFromHandle(hwnd)
+            .map_err(|error| format!("failed to read Paint UIA tree: {error}"))?;
+        let element = find_uia_element_by_name_contains(&automation, &root, "pencil")
+            .ok_or_else(|| "Pencil UIA element not found".to_string())?;
+
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        {
+            pattern
+                .Invoke()
+                .map_err(|error| format!("failed to invoke Pencil UIA element: {error}"))?;
+            return Ok(());
+        }
+
+        let mut point = POINT { x: 0, y: 0 };
+        match element.GetClickablePoint(&mut point) {
+            Ok(got_clickable) if got_clickable.as_bool() => {
+                SetCursorPos(point.x, point.y)
+                    .map_err(|error| format!("failed to move cursor to Pencil: {error}"))?;
+                mouse_event(MOUSEEVENTF_LEFTDOWN, point.x, point.y, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, point.x, point.y, 0, 0);
+                Ok(())
+            }
+            Ok(_) => Err("Pencil UIA element has no clickable point".to_string()),
+            Err(error) => Err(format!("failed to read Pencil clickable point: {error}")),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_uia_element_by_name_contains(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+    needle: &str,
+) -> Option<IUIAutomationElement> {
+    let needle = needle.to_lowercase();
+    unsafe {
+        let walker = automation.ControlViewWalker().ok()?;
+        let mut stack = vec![root.clone()];
+
+        while let Some(element) = stack.pop() {
+            if element
+                .CurrentName()
+                .map(|name| name.to_string().to_lowercase().contains(&needle))
+                .unwrap_or(false)
+            {
+                return Some(element);
+            }
+
+            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
+                let mut siblings = vec![first_child.clone()];
+                let mut current = first_child;
+                while let Ok(next) = walker.GetNextSiblingElement(&current) {
+                    siblings.push(next.clone());
+                    current = next;
+                }
+                for child in siblings.into_iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn replay_recorded_pencil_toolbar_click(events: &[RecordedEvent]) -> bool {
+    let Some(event) = recorded_pencil_toolbar_event(events) else {
+        return false;
+    };
+    let rect = event
+        .window_rect
+        .as_ref()
+        .or_else(|| events.iter().find_map(|candidate| candidate.window_rect.as_ref()));
+    let (x, y) = resolve_replay_point(event, rect);
+    unsafe {
+        if SetCursorPos(x, y).is_err() {
+            return false;
+        }
+        mouse_event(MOUSEEVENTF_LEFTDOWN, x, y, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, x, y, 0, 0);
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn recorded_pencil_toolbar_event(events: &[RecordedEvent]) -> Option<&RecordedEvent> {
+    events
+        .iter()
+        .filter(|event| event.kind == "mousedown")
+        .find(|event| {
+            event
+                .element_name
+                .as_deref()
+                .map(|name| name.to_lowercase().contains("pencil"))
+                .unwrap_or(false)
+        })
+        .or_else(|| {
+            events.iter().filter(|event| event.kind == "mousedown").find(|event| {
+                let normalized_y = event.normalized_y.unwrap_or(1.0);
+                let element_name = event
+                    .element_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase();
+                normalized_y < 0.25
+                    && !element_name.contains("colour")
+                    && !element_name.contains("color")
+                    && !element_name.contains("shape")
+                    && !element_name.contains("using ")
+            })
+        })
 }
 
 fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
@@ -1323,9 +1480,17 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
-    let replay_rect = active_window_rect();
+    let replay_rect = payload
+        .events
+        .iter()
+        .find_map(|event| event.window_rect.clone())
+        .or_else(active_window_rect);
+    if let Some(rect) = replay_rect.as_ref() {
+        align_focused_window_to_record_rect(rect);
+    }
     let mut replayed = 0usize;
     let mut skipped_toolbar_mousedown = false;
+    let mut left_button_down = false;
     for event in payload.events.iter().filter(|e| {
         matches!(e.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
@@ -1346,14 +1511,32 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             skipped_toolbar_mousedown = false;
         }
         let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
+
         unsafe {
-            let _ = SetCursorPos(x, y);
             match (event.kind.as_str(), event.button.as_deref().unwrap_or("left")) {
-                ("mousemove", _) => mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0),
-                ("mousedown", "right") => mouse_event(MOUSEEVENTF_RIGHTDOWN, x, y, 0, 0),
-                ("mouseup", "right") => mouse_event(MOUSEEVENTF_RIGHTUP, x, y, 0, 0),
-                ("mousedown", _) => mouse_event(MOUSEEVENTF_LEFTDOWN, x, y, 0, 0),
-                ("mouseup", _) => mouse_event(MOUSEEVENTF_LEFTUP, x, y, 0, 0),
+                ("mousemove", _) if left_button_down => send_absolute_mousemove(x, y),
+                ("mousemove", _) => {
+                    let _ = SetCursorPos(x, y);
+                    mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
+                }
+                ("mousedown", "right") => {
+                    let _ = SetCursorPos(x, y);
+                    mouse_event(MOUSEEVENTF_RIGHTDOWN, x, y, 0, 0);
+                }
+                ("mouseup", "right") => {
+                    let _ = SetCursorPos(x, y);
+                    mouse_event(MOUSEEVENTF_RIGHTUP, x, y, 0, 0);
+                }
+                ("mousedown", _) => {
+                    let _ = SetCursorPos(x, y);
+                    left_button_down = true;
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, x, y, 0, 0);
+                }
+                ("mouseup", _) => {
+                    let _ = SetCursorPos(x, y);
+                    mouse_event(MOUSEEVENTF_LEFTUP, x, y, 0, 0);
+                    left_button_down = false;
+                }
                 _ => {}
             }
         }
@@ -1361,6 +1544,30 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         thread::sleep(Duration::from_millis(20));
     }
     (json!({"ok": true, "replayed": replayed, "target_window": payload.target_window}), 200)
+}
+
+#[cfg(target_os = "windows")]
+fn send_absolute_mousemove(x: i32, y: i32) {
+    unsafe {
+        let screen_width = GetSystemMetrics(SM_CXSCREEN).max(1);
+        let screen_height = GetSystemMetrics(SM_CYSCREEN).max(1);
+        let dx = (x.clamp(0, screen_width) * 65_535) / screen_width;
+        let dy = (y.clamp(0, screen_height) * 65_535) / screen_height;
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1605,6 +1812,42 @@ fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
             None
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn align_focused_window_to_record_rect(record_rect: &WindowRect) {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return;
+        }
+        let Some(live_rect) = window_rect_for_hwnd(hwnd) else {
+            return;
+        };
+        if !rect_differs_by_more_than(&live_rect, record_rect, 20) {
+            return;
+        }
+        if SetWindowPos(
+            hwnd,
+            None,
+            record_rect.left,
+            record_rect.top,
+            record_rect.width,
+            record_rect.height,
+            SWP_NOZORDER,
+        )
+        .is_ok()
+        {
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
+}
+
+fn rect_differs_by_more_than(left: &WindowRect, right: &WindowRect, tolerance: i32) -> bool {
+    (left.left - right.left).abs() > tolerance
+        || (left.top - right.top).abs() > tolerance
+        || (left.width - right.width).abs() > tolerance
+        || (left.height - right.height).abs() > tolerance
 }
 
 #[cfg(target_os = "windows")]
