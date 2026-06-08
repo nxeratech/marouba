@@ -1351,16 +1351,6 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             ));
             continue;
         }
-        if matches!(event.kind.as_str(), "mousedown" | "mousemove")
-            && event.normalized_y.map(|value| value < 0.15).unwrap_or(false)
-            && !is_colour_select_event(event)
-        {
-            write_debug_log(&format!(
-                "skipped toolbar/ribbon event: {} {:?} {:?}",
-                event.kind, event.normalized_x, event.normalized_y
-            ));
-            continue;
-        }
         if skipped_colour_mouseup && event.kind == "mouseup" {
             skipped_colour_mouseup = false;
             continue;
@@ -1381,6 +1371,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     }
                 }
             }
+        }
+        // Paint toolbar/ribbon cutoff: normalized_y < 0.20 is UI chrome, not canvas.
+        if matches!(event.kind.as_str(), "mousedown" | "mousemove")
+            && event.normalized_y.map(|value| value < 0.20).unwrap_or(false)
+        {
+            write_debug_log(&format!(
+                "skipped toolbar/ribbon event: {} {:?} {:?}",
+                event.kind, event.normalized_x, event.normalized_y
+            ));
+            continue;
         }
         let Some((x, y)) = resolve_replay_point(event, Some(&replay_rect)) else {
             write_debug_log(&format!(
