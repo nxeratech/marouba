@@ -20,7 +20,7 @@ use windows::core::PCWSTR;
 #[cfg(target_os = "windows")]
 use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -39,7 +39,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_MENU, VK_RBUTTON,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_RBUTTON,
     VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
@@ -47,8 +47,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow,
-    SW_SHOWNORMAL, WM_KEYDOWN, WM_KEYUP, WM_SETFOCUS,
+    IsWindowVisible, SetCursorPos, SetForegroundWindow, SW_SHOWNORMAL,
 };
 
 #[derive(Clone, Debug)]
@@ -1348,7 +1347,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     for event in payload.events.iter().filter(|event| {
         matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
-        if normalized_event_outside_window(event) {
+        if event.kind == "mousemove" && normalized_event_outside_window(event) {
             write_debug_log(&format!(
                 "skipped out-of-bounds event: {} {:?} {:?}",
                 event.kind, event.normalized_x, event.normalized_y
@@ -1369,15 +1368,9 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         continue;
                     }
                     Err(error) => {
-                        return (
-                            json!({
-                                "ok": false,
-                                "replayed": replayed,
-                                "target_window": payload.target_window,
-                                "error": error
-                            }),
-                            500,
-                        );
+                        write_debug_log(&format!(
+                            "colour_select failed, falling back to raw click: {error}"
+                        ));
                     }
                 }
             }
@@ -1576,33 +1569,14 @@ fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRe
         rect.left, rect.top, rect.width, rect.height
     ));
     unsafe {
-        let _ = SendMessageW(hwnd, WM_SETFOCUS, WPARAM(0), LPARAM(0));
+        if !SetForegroundWindow(hwnd).as_bool() {
+            return Err("SetForegroundWindow returned false for Paint prelude".to_string());
+        }
     }
-    write_debug_log("WM_SETFOCUS sent");
+    write_debug_log("SetForegroundWindow sent");
+    // Tool prelude removed — was causing selection state. Re-add when UIA toolbar click is implemented.
     thread::sleep(Duration::from_millis(500));
-    send_key(VK_ESCAPE)?;
-    write_debug_log("sent key: VK_ESCAPE");
-    thread::sleep(Duration::from_millis(300));
-    send_key(VK_ESCAPE)?;
-    write_debug_log("sent key: VK_ESCAPE");
-    thread::sleep(Duration::from_millis(300));
-    post_key_to_window(hwnd, VIRTUAL_KEY(0x50), "P")?;
-    thread::sleep(Duration::from_millis(500));
-    post_key_to_window(hwnd, VK_ESCAPE, "VK_ESCAPE")?;
-    thread::sleep(Duration::from_millis(300));
     Ok(rect)
-}
-
-#[cfg(target_os = "windows")]
-fn post_key_to_window(hwnd: HWND, key: VIRTUAL_KEY, label: &str) -> Result<(), String> {
-    unsafe {
-        PostMessageW(hwnd, WM_KEYDOWN, WPARAM(key.0 as usize), LPARAM(0))
-            .map_err(|error| format!("failed to post WM_KEYDOWN {label}: {error}"))?;
-        PostMessageW(hwnd, WM_KEYUP, WPARAM(key.0 as usize), LPARAM(0))
-            .map_err(|error| format!("failed to post WM_KEYUP {label}: {error}"))?;
-    }
-    write_debug_log(&format!("posted key: {label}"));
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
