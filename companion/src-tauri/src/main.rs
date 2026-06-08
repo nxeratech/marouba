@@ -26,13 +26,17 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree, UIA_NamePropertyId,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, BlockInput, GetAsyncKeyState, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VK_LBUTTON, VK_RBUTTON,
+    mouse_event, BlockInput, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, VIRTUAL_KEY, VK_BACK,
+    VK_CONTROL, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -102,6 +106,8 @@ struct RecordedEvent {
     window_rect: Option<WindowRect>,
     element_name: Option<String>,
     element_role: Option<String>,
+    colour_hex: Option<String>,
+    semantic: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -410,6 +416,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     window_rect: active_window_rect(),
                     element_name: None,
                     element_role: None,
+                    colour_hex: None,
+                    semantic: None,
                 },
             );
         } else if current_app_name.is_empty() || current_app_name == "unknown" {
@@ -498,6 +506,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                             window_rect: active_window_rect(),
                             element_name: None,
                             element_role: None,
+                            colour_hex: None,
+                            semantic: None,
                         },
                     );
                 }
@@ -520,6 +530,8 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     window_rect: active_window_rect(),
                     element_name: None,
                     element_role: None,
+                    colour_hex: None,
+                    semantic: None,
                 },
             );
         }
@@ -595,6 +607,8 @@ fn mouse_event_record(
         window_rect: rect,
         element_name: None,
         element_role: None,
+        colour_hex: None,
+        semantic: None,
     };
     if kind == "mousedown" {
         if let Ok((element, _)) = find_uia_element(&UiaRequest {
@@ -613,6 +627,14 @@ fn mouse_event_record(
             });
             event.element_name = body.get("name").and_then(Value::as_str).map(str::to_string);
             event.element_role = body.get("control_type").map(Value::to_string);
+        }
+        if is_ms_paint_event(&event)
+            && normalized_y.map(|value| value < 0.16 && value > 0.09).unwrap_or(false)
+        {
+            if let Some(colour_hex) = sample_screen_colour_hex(x, y) {
+                event.colour_hex = Some(colour_hex);
+                event.semantic = Some("colour_select".to_string());
+            }
         }
     }
     event
@@ -1248,9 +1270,36 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let _input_guard = InputBlockGuard::new();
     let replay_rect = active_window_rect();
     let mut replayed = 0usize;
+    let mut skipped_colour_mouseup = false;
     for event in payload.events.iter().filter(|event| {
         matches!(event.kind.as_str(), "mousemove" | "mousedown" | "mouseup")
     }) {
+        if skipped_colour_mouseup && event.kind == "mouseup" {
+            skipped_colour_mouseup = false;
+            continue;
+        }
+        if is_colour_select_event(event) {
+            if let Some(colour_hex) = event.colour_hex.as_deref() {
+                match replay_ms_paint_colour_select(colour_hex) {
+                    Ok(()) => {
+                        skipped_colour_mouseup = true;
+                        replayed += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        return (
+                            json!({
+                                "ok": false,
+                                "replayed": replayed,
+                                "target_window": payload.target_window,
+                                "error": error
+                            }),
+                            500,
+                        );
+                    }
+                }
+            }
+        }
         let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
         unsafe {
             let _ = SetCursorPos(x, y);
@@ -1281,6 +1330,144 @@ fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i3
         return (x, y);
     }
     (event.x.unwrap_or(0), event.y.unwrap_or(0))
+}
+
+fn is_colour_select_event(event: &RecordedEvent) -> bool {
+    event.kind == "mousedown"
+        && event.semantic.as_deref() == Some("colour_select")
+        && event.colour_hex.is_some()
+        && is_ms_paint_event(event)
+}
+
+fn is_ms_paint_event(event: &RecordedEvent) -> bool {
+    event
+        .app_name
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase().contains("paint"))
+        .unwrap_or(false)
+        || event
+            .window_title
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains("paint"))
+            .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
+    unsafe {
+        let hdc = GetDC(HWND(std::ptr::null_mut()));
+        if hdc.0.is_null() {
+            return None;
+        }
+        let colour = GetPixel(hdc, x, y);
+        let _ = ReleaseDC(HWND(std::ptr::null_mut()), hdc);
+        if colour.0 == 0xFFFF_FFFF {
+            return None;
+        }
+        let value = colour.0;
+        let red = value & 0xFF;
+        let green = (value >> 8) & 0xFF;
+        let blue = (value >> 16) & 0xFF;
+        Some(format!("#{red:02X}{green:02X}{blue:02X}"))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ms_paint_colour_select(colour_hex: &str) -> Result<(), String> {
+    let (red, green, blue) = parse_colour_hex(colour_hex)?;
+    send_modified_key(VK_MENU, VIRTUAL_KEY(0x45))?;
+    thread::sleep(Duration::from_millis(80));
+    send_key(VIRTUAL_KEY(0x43))?;
+    thread::sleep(Duration::from_millis(400));
+    replace_current_field(red)?;
+    send_key(VK_TAB)?;
+    replace_current_field(green)?;
+    send_key(VK_TAB)?;
+    replace_current_field(blue)?;
+    send_key(VK_RETURN)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replay_ms_paint_colour_select(_: &str) -> Result<(), String> {
+    Err("semantic colour replay is not implemented on this platform".to_string())
+}
+
+fn parse_colour_hex(value: &str) -> Result<(u8, u8, u8), String> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return Err(format!("invalid colour hex '{value}'"));
+    }
+    let red = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("invalid red value in '{value}'"))?;
+    let green = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("invalid green value in '{value}'"))?;
+    let blue = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("invalid blue value in '{value}'"))?;
+    Ok((red, green, blue))
+}
+
+#[cfg(target_os = "windows")]
+fn replace_current_field(value: u8) -> Result<(), String> {
+    send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x41))?;
+    send_key(VK_BACK)?;
+    type_ascii(&value.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn type_ascii(value: &str) -> Result<(), String> {
+    for byte in value.bytes() {
+        send_key(VIRTUAL_KEY(byte as u16))?;
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn send_modified_key(modifier: VIRTUAL_KEY, key: VIRTUAL_KEY) -> Result<(), String> {
+    send_key_down(modifier)?;
+    send_key(key)?;
+    send_key_up(modifier)
+}
+
+#[cfg(target_os = "windows")]
+fn send_key(key: VIRTUAL_KEY) -> Result<(), String> {
+    send_key_down(key)?;
+    thread::sleep(Duration::from_millis(20));
+    send_key_up(key)
+}
+
+#[cfg(target_os = "windows")]
+fn send_key_down(key: VIRTUAL_KEY) -> Result<(), String> {
+    send_keyboard_input(key, KEYBD_EVENT_FLAGS(0))
+}
+
+#[cfg(target_os = "windows")]
+fn send_key_up(key: VIRTUAL_KEY) -> Result<(), String> {
+    send_keyboard_input(key, KEYEVENTF_KEYUP)
+}
+
+#[cfg(target_os = "windows")]
+fn send_keyboard_input(key: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> Result<(), String> {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err(format!("SendInput failed for virtual key {}", key.0))
+    }
 }
 
 #[cfg(target_os = "windows")]
