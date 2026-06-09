@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"]
 
+mod classifier;
+
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,13 +24,13 @@ use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-};
-#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel,
     ReleaseDC, SelectObject, SRCCOPY,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
@@ -38,17 +40,16 @@ use windows::Win32::UI::Accessibility::{
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU,
-    VK_RBUTTON, VK_RETURN, VK_TAB,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, SM_CXSCREEN,
+    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, ShowWindow, SM_CXSCREEN,
     SM_CYSCREEN, SW_SHOWNORMAL,
 };
 
@@ -218,7 +219,11 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
         });
 
-    builder = builder.icon(Image::new(include_bytes!("../icons/tray_icon_rgba.bin"), 32, 32));
+    builder = builder.icon(Image::new(
+        include_bytes!("../icons/tray_icon_rgba.bin"),
+        32,
+        32,
+    ));
     let tray = builder.build(app)?;
     app.manage(tray);
     Ok(())
@@ -260,8 +265,13 @@ fn recording_status(state: tauri::State<Arc<Mutex<AppState>>>) -> RecordingStatu
 }
 
 #[tauri::command]
-fn delete_step(index: usize, state: tauri::State<Arc<Mutex<AppState>>>) -> Result<RecordingStatus, String> {
-    let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
+fn delete_step(
+    index: usize,
+    state: tauri::State<Arc<Mutex<AppState>>>,
+) -> Result<RecordingStatus, String> {
+    let mut guard = state
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_string())?;
     if index < guard.events.len() {
         guard.events.remove(index);
         push_log(&mut guard, format!("Deleted step {}", index + 1));
@@ -275,7 +285,9 @@ fn save_workflow(
     request: SaveWorkflowRequest,
     state: tauri::State<Arc<Mutex<AppState>>>,
 ) -> Result<String, String> {
-    let guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
+    let guard = state
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_string())?;
     let keep: HashSet<usize> = request.keep_indexes.into_iter().collect();
     let events: Vec<RecordedEvent> = guard
         .events
@@ -292,7 +304,9 @@ fn save_workflow(
     }
     let metadata = describe_with_claude(&request.name, &events);
     let path = write_workflow(&request.name, &events, metadata)?;
-    let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
+    let mut guard = state
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_string())?;
     push_log(&mut guard, format!("Saved {}", path.display()));
     Ok(path.display().to_string())
 }
@@ -335,7 +349,9 @@ fn companion_token() -> Result<String, String> {
 
 fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let should_spawn = {
-        let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
+        let mut guard = state
+            .lock()
+            .map_err(|_| "recording state is unavailable".to_string())?;
         guard.recording = true;
         guard.events.clear();
         push_log(&mut guard, "Recording started".to_string());
@@ -353,16 +369,24 @@ fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String>
 }
 
 fn stop_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
-    let mut guard = state.lock().map_err(|_| "recording state is unavailable".to_string())?;
+    let mut guard = state
+        .lock()
+        .map_err(|_| "recording state is unavailable".to_string())?;
     guard.recording = false;
     let before_count = guard.events.len();
     guard.events.retain(|event| !is_marouba_event(event));
     let event_count = guard.events.len();
     let removed_count = before_count.saturating_sub(event_count);
     if removed_count > 0 {
-        push_log(&mut guard, format!("Filtered {removed_count} Marouba control steps"));
+        push_log(
+            &mut guard,
+            format!("Filtered {removed_count} Marouba control steps"),
+        );
     }
-    push_log(&mut guard, format!("Recording stopped: {event_count} steps"));
+    push_log(
+        &mut guard,
+        format!("Recording stopped: {event_count} steps"),
+    );
     Ok(())
 }
 fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
@@ -375,7 +399,10 @@ fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
         },
         Err(_) => RecordingStatus {
             mode: "offline".to_string(),
-            active_window: WindowInfo { title: "unknown".to_string(), app_name: "unknown".to_string() },
+            active_window: WindowInfo {
+                title: "unknown".to_string(),
+                app_name: "unknown".to_string(),
+            },
             steps: Vec::new(),
             last_actions: vec!["Recording state unavailable".to_string()],
         },
@@ -596,10 +623,23 @@ fn push_log(state: &mut AppState, label: String) {
 
 fn event_label(event: &RecordedEvent) -> String {
     match event.kind.as_str() {
-        "mousemove" => format!("Mouse move {}, {}", event.x.unwrap_or(0), event.y.unwrap_or(0)),
-        "mousedown" | "mouseup" => format!("{} {} {}, {}", event.kind, event.button.as_deref().unwrap_or("left"), event.x.unwrap_or(0), event.y.unwrap_or(0)),
+        "mousemove" => format!(
+            "Mouse move {}, {}",
+            event.x.unwrap_or(0),
+            event.y.unwrap_or(0)
+        ),
+        "mousedown" | "mouseup" => format!(
+            "{} {} {}, {}",
+            event.kind,
+            event.button.as_deref().unwrap_or("left"),
+            event.x.unwrap_or(0),
+            event.y.unwrap_or(0)
+        ),
         "keydown" | "keyup" => format!("{} {}", event.kind, event.key.as_deref().unwrap_or("?")),
-        "focus" => format!("Focus {}", event.window_title.as_deref().unwrap_or("unknown")),
+        "focus" => format!(
+            "Focus {}",
+            event.window_title.as_deref().unwrap_or("unknown")
+        ),
         _ => event.kind.clone(),
     }
 }
@@ -653,13 +693,17 @@ fn mouse_event_record(
             x: Some(x),
             y: Some(y),
         }) {
-            let body = element_json(&element, event.window_title.as_deref().unwrap_or(""), &UiaRequest {
-                name: None,
-                role: None,
-                window_title: None,
-                x: Some(x),
-                y: Some(y),
-            });
+            let body = element_json(
+                &element,
+                event.window_title.as_deref().unwrap_or(""),
+                &UiaRequest {
+                    name: None,
+                    role: None,
+                    window_title: None,
+                    x: Some(x),
+                    y: Some(y),
+                },
+            );
             event.element_name = body.get("name").and_then(Value::as_str).map(str::to_string);
             event.element_role = body.get("control_type").map(Value::to_string);
         }
@@ -693,8 +737,7 @@ fn mouse_event_record(
         } else {
             eprintln!(
                 "[Marouba] Colour capture skipped; window title '{}' app '{}'",
-                window.title,
-                current_app_name
+                window.title, current_app_name
             );
         }
     }
@@ -924,9 +967,13 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
     }
 
     let mut command = Command::new(replay_python_command());
-    command
-        .current_dir(marouba_root_dir())
-        .args(["scripts/replay.py", "--workflow", &name, "--params", "{}"]);
+    command.current_dir(marouba_root_dir()).args([
+        "scripts/replay.py",
+        "--workflow",
+        &name,
+        "--params",
+        "{}",
+    ]);
     let child = no_window_command(&mut command).spawn();
     match child {
         Ok(child) => (json!({"status": "started", "pid": child.id()}), 200),
@@ -953,7 +1000,13 @@ fn replay_target_windows(name: &str, events: &[RecordedEvent]) -> Vec<String> {
     if let Some(app_name) = parse_workflow_app_name(name) {
         push_unique_window(&mut candidates, app_name);
     }
-    candidates.sort_by_key(|title| if is_known_creative_window(title) { 0 } else { 1 });
+    candidates.sort_by_key(|title| {
+        if is_known_creative_window(title) {
+            0
+        } else {
+            1
+        }
+    });
     candidates
 }
 
@@ -962,16 +1015,28 @@ fn push_unique_window(candidates: &mut Vec<String>, title: String) {
     if trimmed.is_empty() {
         return;
     }
-    if !candidates.iter().any(|candidate| candidate.eq_ignore_ascii_case(trimmed)) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(trimmed))
+    {
         candidates.push(trimmed.to_string());
     }
 }
 
 fn is_known_creative_window(title: &str) -> bool {
     let lower = title.to_ascii_lowercase();
-    ["paint", "notepad++", "photoshop", "ableton", "blender", "comfyui", "chrome", "edge"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "paint",
+        "notepad++",
+        "photoshop",
+        "ableton",
+        "blender",
+        "comfyui",
+        "chrome",
+        "edge",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn app_name_hint_from_window_title(title: &str) -> Option<String> {
@@ -991,7 +1056,10 @@ fn app_name_hints_for_targets(candidates: &[String]) -> Vec<String> {
         if let Some(app_name) = app_name_hint_from_window_title(candidate) {
             push_unique_window(&mut hints, app_name);
         }
-        push_unique_window(&mut hints, candidate.trim_start_matches('*').trim().to_string());
+        push_unique_window(
+            &mut hints,
+            candidate.trim_start_matches('*').trim().to_string(),
+        );
     }
     hints
 }
@@ -1007,15 +1075,17 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
     if let Ok(window_title) = focus_first_available_window(candidates) {
         return Ok(window_title);
     }
+    if is_ableton_target(candidates) {
+        return Err("Please open Ableton Live and retry".to_string());
+    }
     if let Ok(window_title) = focus_running_process_for_targets(candidates) {
         return Ok(window_title);
     }
-    let app = launchable_app_for_targets(candidates)
-        .ok_or_else(|| {
-            let app_name = display_app_name_for_targets(candidates)
-                .unwrap_or_else(|| "the target app".to_string());
-            format!("Could not find {app_name} — please open it manually and retry")
-        })?;
+    let app = launchable_app_for_targets(candidates).ok_or_else(|| {
+        let app_name = display_app_name_for_targets(candidates)
+            .unwrap_or_else(|| "the target app".to_string());
+        format!("Could not find {app_name} — please open it manually and retry")
+    })?;
     launch_app(&app)?;
     for _ in 0..12 {
         thread::sleep(Duration::from_millis(500));
@@ -1047,6 +1117,9 @@ struct LaunchableApp {
 fn launchable_app_for_targets(candidates: &[String]) -> Option<LaunchableApp> {
     for app_name in app_name_hints_for_targets(candidates) {
         let lower = app_name.to_ascii_lowercase();
+        if lower.contains("ableton") {
+            continue;
+        }
         if lower.contains("paint") {
             return Some(LaunchableApp {
                 display_name: "Paint".to_string(),
@@ -1076,11 +1149,24 @@ fn launchable_app_for_targets(candidates: &[String]) -> Option<LaunchableApp> {
     None
 }
 
+fn is_ableton_target(candidates: &[String]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.to_ascii_lowercase().contains("ableton live"))
+}
+
 #[cfg(target_os = "windows")]
 fn launch_app(app: &LaunchableApp) -> Result<(), String> {
-    if app.executable.to_ascii_lowercase().ends_with("notepad++.exe") {
+    if app
+        .executable
+        .to_ascii_lowercase()
+        .ends_with("notepad++.exe")
+    {
         let escaped_path = app.executable.replace('\'', "''");
-        let script = format!("Start-Process -FilePath '{}' -ArgumentList '-multiInst'", escaped_path);
+        let script = format!(
+            "Start-Process -FilePath '{}' -ArgumentList '-multiInst'",
+            escaped_path
+        );
         let mut command = Command::new("powershell.exe");
         command.args(["-NoProfile", "-Command", &script]);
         let output = no_window_command(&mut command).output().map_err(|error| {
@@ -1096,7 +1182,11 @@ fn launch_app(app: &LaunchableApp) -> Result<(), String> {
         return Err(format!(
             "Could not launch {}. Please open it manually. ({})",
             app.display_name,
-            if stderr.is_empty() { "launcher returned a failure" } else { &stderr }
+            if stderr.is_empty() {
+                "launcher returned a failure"
+            } else {
+                &stderr
+            }
         ));
     }
     shell_execute(&app.executable).map_err(|error| {
@@ -1151,7 +1241,12 @@ fn find_matching_executable(app_name: &str) -> Option<String> {
     }
 
     let mut roots = Vec::new();
-    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "APPDATA"] {
+    for key in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+        "APPDATA",
+    ] {
         if let Ok(path) = std::env::var(key) {
             push_unique_path(&mut roots, PathBuf::from(path));
         }
@@ -1204,7 +1299,12 @@ fn find_executable_in_tree(root: &PathBuf, wanted: &str, max_entries: usize) -> 
                 stack.push(path);
                 continue;
             }
-            if path.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case("exe")) != Some(true) {
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("exe"))
+                != Some(true)
+            {
                 continue;
             }
             let stem = path
@@ -1233,7 +1333,9 @@ fn executable_stem_hint(app_name: &str) -> String {
             .split_whitespace()
             .next()
             .unwrap_or("")
-            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '+' && ch != '-' && ch != '_')
+            .trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && ch != '+' && ch != '-' && ch != '_'
+            })
             .to_string()
     }
 }
@@ -1363,7 +1465,11 @@ fn focus_target_window(window_title: &str) -> Result<(), String> {
     let hwnd = find_window_containing(window_title)
         .ok_or_else(|| format!("no visible top-level window contains '{window_title}'"))?;
     unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        thread::sleep(Duration::from_millis(120));
         if SetForegroundWindow(hwnd).as_bool() {
+            Ok(())
+        } else if send_key(VK_MENU).is_ok() && SetForegroundWindow(hwnd).as_bool() {
             Ok(())
         } else {
             Err("SetForegroundWindow returned false".to_string())
@@ -1390,7 +1496,10 @@ fn find_window_containing(target: &str) -> Option<HWND> {
             needles.push(app_hint);
         }
     }
-    let mut search = WindowSearch { needles, hwnd: None };
+    let mut search = WindowSearch {
+        needles,
+        hwnd: None,
+    };
     unsafe {
         let search_ptr = &mut search as *mut WindowSearch;
         let _ = EnumWindows(Some(enum_windows_match_title), LPARAM(search_ptr as isize));
@@ -1460,7 +1569,11 @@ fn delete_saved_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
 
 fn safe_workflow_name(value: &str) -> Result<String, String> {
     let name = value.trim();
-    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         Err("workflow name must contain only letters, numbers, hyphen, or underscore".to_string())
     } else {
         Ok(name.to_string())
@@ -1493,9 +1606,10 @@ fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {
 
 fn is_authorized(request: &tiny_http::Request, token: &str) -> bool {
     let expected = format!("Bearer {}", token);
-    request.headers().iter().any(|header| {
-        header.field.equiv("Authorization") && header.value.as_str() == expected
-    })
+    request
+        .headers()
+        .iter()
+        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == expected)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(request: &mut tiny_http::Request) -> T {
@@ -1512,11 +1626,8 @@ fn cors_response(value: Value, status: u16) -> Response<std::io::Cursor<Vec<u8>>
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
     let content_type = Header::from_bytes("Content-Type", "application/json").unwrap();
     let allow_origin = Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap();
-    let allow_methods = Header::from_bytes(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS",
-    )
-    .unwrap();
+    let allow_methods =
+        Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap();
     let allow_headers = Header::from_bytes(
         "Access-Control-Allow-Headers",
         "Authorization, Content-Type",
@@ -1565,17 +1676,27 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let mut skipped_toolbar_mousedown = false;
     let mut skipped_uia_mousedown = false;
     let mut left_button_down = false;
+    let mut ableton_note_grid_mouse_down = false;
     let mut logged_first_canvas_mousemove = false;
     let replay_events: Vec<&RecordedEvent> = payload
         .events
         .iter()
-        .filter(|e| matches!(e.kind.as_str(), "mousemove" | "mousedown" | "mouseup" | "keydown" | "keyup"))
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                "mousemove" | "mousedown" | "mouseup" | "keydown" | "keyup"
+            )
+        })
         .collect();
     let mut index = 0usize;
     while index < replay_events.len() {
         let event = replay_events[index];
         if matches!(event.kind.as_str(), "keydown" | "keyup") {
-            if let Some(target) = payload.target_window.as_deref() {
+            if let Some(target) = payload
+                .target_window
+                .as_deref()
+                .filter(|_| !is_ableton_event(event))
+            {
                 let _ = focus_target_window(target);
             }
             if replay_keyboard_event(event).is_ok() {
@@ -1588,12 +1709,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             index += 1;
             continue;
         }
-        if event.kind == "mousemove" && normalized_event_outside_window(event) {
+        if event.kind == "mousemove"
+            && normalized_event_outside_window(event)
+            && !(left_button_down && is_ableton_event(event))
+        {
             index += 1;
             continue;
         }
         if skipped_toolbar_mousedown && event.kind == "mouseup" {
             skipped_toolbar_mousedown = false;
+            ableton_note_grid_mouse_down = false;
             thread::sleep(replay_event_delay(
                 event,
                 replay_events.get(index + 1).copied(),
@@ -1603,6 +1728,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         }
         if skipped_uia_mousedown && event.kind == "mouseup" {
             skipped_uia_mousedown = false;
+            ableton_note_grid_mouse_down = false;
             thread::sleep(replay_event_delay(
                 event,
                 replay_events.get(index + 1).copied(),
@@ -1622,7 +1748,15 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             skipped_toolbar_mousedown = false;
             skipped_uia_mousedown = false;
         }
-        let (x, y) = resolve_replay_point(event, replay_rect.as_ref());
+        let (x, y) = if is_ableton_event(event) {
+            resolve_ableton_replay_point_with_note_context(
+                event,
+                replay_rect.as_ref(),
+                ableton_note_grid_mouse_down,
+            )
+        } else {
+            resolve_replay_point(event, replay_rect.as_ref())
+        };
         if event.kind == "mousedown" {
             write_debug_log(&format!(
                 "mousedown: stored_x={:?} stored_y={:?} normalized_x={:?} normalized_y={:?} resolution_rect={} resolved_x={} resolved_y={}",
@@ -1634,6 +1768,71 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                 x,
                 y
             ));
+            if !left_button_down && is_ableton_event(event) {
+                if let Some(up_index) = replay_ableton_group_tracks_if_present(
+                    &replay_events,
+                    index,
+                    replay_rect.as_ref(),
+                ) {
+                    replayed += up_index - index + 1;
+                    thread::sleep(replay_event_delay(
+                        replay_events[up_index],
+                        replay_events.get(up_index + 1).copied(),
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+                if let Some(up_index) = replay_ableton_double_click_if_present(
+                    &replay_events,
+                    index,
+                    replay_rect.as_ref(),
+                ) {
+                    replayed += 4;
+                    thread::sleep(replay_event_delay(
+                        replay_events[up_index],
+                        replay_events.get(up_index + 1).copied(),
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+                if let Some(up_index) = replay_ableton_search_segment_if_present(
+                    &replay_events,
+                    index,
+                    replay_rect.as_ref(),
+                ) {
+                    replayed += up_index - index + 1;
+                    thread::sleep(replay_event_delay(
+                        replay_events[up_index],
+                        replay_events.get(up_index + 1).copied(),
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+                if let Some(up_index) = replay_ableton_instrument_drag_if_present(
+                    &replay_events,
+                    index,
+                    replay_rect.as_ref(),
+                ) {
+                    replayed += up_index - index + 1;
+                    thread::sleep(replay_event_delay(
+                        replay_events[up_index],
+                        replay_events.get(up_index + 1).copied(),
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+                if let Some(up_index) =
+                    replay_ableton_drag_if_present(&replay_events, index, replay_rect.as_ref())
+                {
+                    replayed += up_index - index + 1;
+                    thread::sleep(replay_event_delay(
+                        replay_events[up_index],
+                        replay_events.get(up_index + 1).copied(),
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+            }
             if !left_button_down && try_uia_named_mousedown(event) {
                 skipped_uia_mousedown = true;
                 replayed += 1;
@@ -1671,8 +1870,9 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         .map(|distance| distance > 0.03)
                         .unwrap_or(true)
                     {
-                        let endpoint = last_mousemove_before_mouseup(&replay_events, index, up_index)
-                            .unwrap_or(up_event);
+                        let endpoint =
+                            last_mousemove_before_mouseup(&replay_events, index, up_index)
+                                .unwrap_or(up_event);
                         let (end_x, end_y) = resolve_replay_point(endpoint, replay_rect.as_ref());
                         let (up_x, up_y) = resolve_replay_point(up_event, replay_rect.as_ref());
                         write_debug_log(&format!(
@@ -1684,7 +1884,11 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         send_absolute_mousemove(end_x, end_y);
                         replayed += 1;
                         thread::sleep(replay_event_delay(endpoint, Some(up_event)));
-                        send_absolute_mouse_input(up_x, up_y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
+                        send_absolute_mouse_input(
+                            up_x,
+                            up_y,
+                            MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
+                        );
                         replayed += 1;
                         thread::sleep(replay_event_delay(
                             up_event,
@@ -1709,7 +1913,10 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             ));
         }
 
-        match (event.kind.as_str(), event.button.as_deref().unwrap_or("left")) {
+        match (
+            event.kind.as_str(),
+            event.button.as_deref().unwrap_or("left"),
+        ) {
             ("mousemove", _) if left_button_down => send_absolute_mousemove(x, y),
             ("mousemove", _) => send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE),
             ("mousedown", "right") => {
@@ -1720,11 +1927,31 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             }
             ("mousedown", _) => {
                 left_button_down = true;
-                send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
+                ableton_note_grid_mouse_down = is_ableton_piano_roll_note_event(event);
+                if is_ableton_event(event) {
+                    send_ableton_mousemove(x, y);
+                    thread::sleep(Duration::from_millis(8));
+                    send_ableton_leftdown(x, y);
+                } else {
+                    send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
+                }
             }
             ("mouseup", _) => {
-                send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
+                if is_ableton_event(event) {
+                    send_ableton_mousemove(x, y);
+                    thread::sleep(Duration::from_millis(8));
+                    send_ableton_leftup(x, y);
+                    if is_ableton_automation_record_event(event) {
+                        write_debug_log(
+                            "ableton automation record pressed: waiting 500ms for automation mode",
+                        );
+                        thread::sleep(Duration::from_millis(500));
+                    }
+                } else {
+                    send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
+                }
                 left_button_down = false;
+                ableton_note_grid_mouse_down = false;
             }
             _ => {}
         }
@@ -1735,16 +1962,27 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         ));
         index += 1;
     }
-    (json!({"ok": true, "replayed": replayed, "target_window": payload.target_window}), 200)
+    (
+        json!({"ok": true, "replayed": replayed, "target_window": payload.target_window}),
+        200,
+    )
 }
 
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {
-    let name = event.element_name.as_deref().unwrap_or("").to_ascii_lowercase();
+    let name = event
+        .element_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     name.contains("fill") && name.contains("canvas")
 }
 
 fn is_shape_canvas_drag(event: &RecordedEvent) -> bool {
-    let name = event.element_name.as_deref().unwrap_or("").to_ascii_lowercase();
+    let name = event
+        .element_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     name.contains("canvas")
         && (name.contains("shape")
             || name.contains("oval")
@@ -1781,6 +2019,321 @@ fn normalized_distance(start: &RecordedEvent, end: &RecordedEvent) -> Option<f64
 }
 
 #[cfg(target_os = "windows")]
+fn replay_ableton_double_click_if_present(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+) -> Option<usize> {
+    let first_down = events.get(start).copied()?;
+    if first_down.kind != "mousedown" || first_down.button.as_deref().unwrap_or("left") != "left" {
+        return None;
+    }
+    if is_ableton_piano_roll_note_event(first_down) {
+        return None;
+    }
+    let first_up_index = compact_click_mouseup_index(events, start)?;
+    let second_down_index = first_up_index + 1;
+    let second_down = events.get(second_down_index).copied()?;
+    if second_down.kind != "mousedown"
+        || second_down.button.as_deref().unwrap_or("left") != "left"
+        || !is_ableton_event(second_down)
+    {
+        return None;
+    }
+    if is_ableton_piano_roll_note_event(second_down) {
+        return None;
+    }
+    let second_up_index = compact_click_mouseup_index(events, second_down_index)?;
+    let first_up = events[first_up_index];
+    let second_up = events[second_up_index];
+    if second_up.button.as_deref().unwrap_or("left") != "left" {
+        return None;
+    }
+    let gap = second_down
+        .timestamp_ms
+        .checked_sub(first_up.timestamp_ms)
+        .unwrap_or(u128::MAX);
+    if gap > 300 {
+        return None;
+    }
+    if normalized_distance(first_down, second_down)
+        .map(|distance| distance > 0.006)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let (x1, y1) = resolve_ableton_replay_point(first_down, rect);
+    let (x2, y2) = resolve_ableton_replay_point(second_down, rect);
+    write_debug_log(&format!(
+        "ableton double click: first=({x1},{y1}) second=({x2},{y2}) gap_ms={gap}"
+    ));
+    send_ableton_left_click(x1, y1, replay_event_delay(first_down, Some(first_up)));
+    thread::sleep(replay_event_delay(first_up, Some(second_down)));
+    send_ableton_left_click(x2, y2, replay_event_delay(second_down, Some(second_up)));
+    Some(second_up_index)
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ableton_drag_if_present(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+) -> Option<usize> {
+    replay_ableton_drag_segment(events, start, rect, Duration::from_millis(30))
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ableton_drag_segment(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+    final_hold: Duration,
+) -> Option<usize> {
+    let down = events.get(start).copied()?;
+    if down.kind != "mousedown" || down.button.as_deref().unwrap_or("left") != "left" {
+        return None;
+    }
+    let up_index = matching_mouseup_index(events, start)?;
+    let up = events[up_index];
+    let endpoint = last_mousemove_before_mouseup(events, start, up_index)?;
+    if normalized_distance(down, endpoint)
+        .map(|distance| distance < 0.015)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let note_grid_segment = is_ableton_piano_roll_note_event(down);
+    let (down_x, down_y) =
+        resolve_ableton_replay_point_with_note_context(down, rect, note_grid_segment);
+    write_debug_log(&format!(
+        "ableton drag segment: down_index={start} up_index={up_index} start=({down_x},{down_y})"
+    ));
+    if is_ableton_knob_or_eq_event(down) {
+        thread::sleep(Duration::from_millis(150));
+    }
+    send_ableton_mousemove(down_x, down_y);
+    thread::sleep(Duration::from_millis(20));
+    send_ableton_leftdown(down_x, down_y);
+
+    let mut previous = down;
+    for event in events[start + 1..up_index].iter().copied() {
+        if event.kind != "mousemove" {
+            continue;
+        }
+        thread::sleep(replay_event_delay(previous, Some(event)));
+        let (x, y) = resolve_ableton_replay_point_with_note_context(event, rect, note_grid_segment);
+        send_ableton_mousemove(x, y);
+        previous = event;
+    }
+
+    thread::sleep(replay_event_delay(previous, Some(up)));
+    let (up_x, up_y) = resolve_ableton_replay_point_with_note_context(up, rect, note_grid_segment);
+    send_ableton_mousemove(up_x, up_y);
+    thread::sleep(final_hold);
+    send_ableton_leftup(up_x, up_y);
+    Some(up_index)
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ableton_instrument_drag_if_present(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+) -> Option<usize> {
+    let down = events.get(start).copied()?;
+    if !is_ableton_bass_instrument_preset(down) {
+        return None;
+    }
+    let up_index = matching_mouseup_index(events, start)?;
+    let endpoint = last_mousemove_before_mouseup(events, start, up_index)?;
+    if normalized_distance(down, endpoint)
+        .map(|distance| distance < 0.015)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    write_debug_log(&format!(
+        "ableton instrument drag preflight: element_name={:?} down_index={start} up_index={up_index}",
+        down.element_name
+    ));
+    let _ = send_ableton_insert_midi_track();
+    thread::sleep(Duration::from_millis(500));
+    replay_ableton_drag_segment(events, start, rect, Duration::from_millis(250))
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ableton_group_tracks_if_present(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+) -> Option<usize> {
+    let down = events.get(start).copied()?;
+    if down.kind != "mousedown"
+        || down.button.as_deref() != Some("right")
+        || down.element_name.as_deref() != Some("Track Title Bar")
+    {
+        return None;
+    }
+    if !recent_ableton_shift_track_selection(events, start) {
+        return None;
+    }
+    if !upcoming_ableton_search_text(events, start, "GLUE") {
+        return None;
+    }
+    let up_index = matching_mouseup_index(events, start)?;
+    write_debug_log(&format!(
+        "ableton group repair: right-click Track Title Bar at index {start}; sending Ctrl+G"
+    ));
+    let _ = send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x47));
+    thread::sleep(Duration::from_millis(500));
+    let (x, y) = resolve_ableton_replay_point(down, rect);
+    write_debug_log(&format!(
+        "ableton group repair: selecting new group track at ({x},{y})"
+    ));
+    send_ableton_left_click(x, y, Duration::from_millis(80));
+    thread::sleep(Duration::from_millis(250));
+    Some(up_index)
+}
+
+fn recent_ableton_shift_track_selection(events: &[&RecordedEvent], start: usize) -> bool {
+    let begin = start.saturating_sub(16);
+    let mut saw_shift = false;
+    let mut saw_track_title_click = false;
+    for event in &events[begin..start] {
+        if event.kind == "keydown" && matches!(event.key.as_deref(), Some("16") | Some("160")) {
+            saw_shift = true;
+        }
+        if event.kind == "mousedown"
+            && event.button.as_deref().unwrap_or("left") == "left"
+            && event
+                .element_name
+                .as_deref()
+                .map(|name| {
+                    name.eq_ignore_ascii_case("Track Title Bar")
+                        || name.to_ascii_lowercase().contains("armed")
+                })
+                .unwrap_or(false)
+        {
+            saw_track_title_click = true;
+        }
+    }
+    saw_shift && saw_track_title_click
+}
+
+fn upcoming_ableton_search_text(events: &[&RecordedEvent], start: usize, expected: &str) -> bool {
+    let end = (start + 80).min(events.len());
+    let mut saw_search = false;
+    let mut typed = String::new();
+    for event in &events[start + 1..end] {
+        if event.kind == "mousedown" && event.element_name.as_deref() == Some("Search") {
+            saw_search = true;
+            continue;
+        }
+        if saw_search && event.kind == "keydown" {
+            if let Some(key) = event
+                .key
+                .as_deref()
+                .and_then(|value| value.parse::<u32>().ok())
+            {
+                if let Some(ch) = char::from_u32(key) {
+                    if ch.is_ascii_alphabetic() {
+                        typed.push(ch.to_ascii_uppercase());
+                        if typed == expected {
+                            return true;
+                        }
+                        if !expected.starts_with(&typed) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_ableton_bass_instrument_preset(event: &RecordedEvent) -> bool {
+    let name = event
+        .element_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    (name.ends_with(".adv") || name.ends_with(".adg")) && name.contains("bass")
+}
+
+#[cfg(target_os = "windows")]
+fn replay_ableton_search_segment_if_present(
+    events: &[&RecordedEvent],
+    start: usize,
+    rect: Option<&WindowRect>,
+) -> Option<usize> {
+    let Some(down) = events.get(start).copied() else {
+        return None;
+    };
+    if down.kind != "mousedown"
+        || down.button.as_deref().unwrap_or("left") != "left"
+        || down.element_name.as_deref() != Some("Search")
+    {
+        return None;
+    }
+    let up_index = matching_mouseup_index(events, start)?;
+    let up = events[up_index];
+    if up.kind != "mouseup" || up.button.as_deref().unwrap_or("left") != "left" {
+        return None;
+    }
+    let (down_x, down_y) = resolve_ableton_replay_point(down, rect);
+    let (up_x, up_y) = resolve_ableton_replay_point(up, rect);
+    write_debug_log(&format!(
+        "ableton search normalize: down_index={start} up_index={up_index} down=({down_x},{down_y}) up=({up_x},{up_y})"
+    ));
+    send_ableton_mousemove(down_x, down_y);
+    thread::sleep(Duration::from_millis(8));
+    send_ableton_leftdown(down_x, down_y);
+    let mut previous = down;
+    for event in events[start + 1..up_index].iter().copied() {
+        if event.kind != "mousemove" {
+            continue;
+        }
+        thread::sleep(replay_event_delay(previous, Some(event)));
+        let (x, y) = resolve_ableton_replay_point(event, rect);
+        send_ableton_mousemove(x, y);
+        previous = event;
+    }
+    thread::sleep(replay_event_delay(previous, Some(up)));
+    send_ableton_mousemove(up_x, up_y);
+    send_ableton_leftup(up_x, up_y);
+    thread::sleep(Duration::from_millis(80));
+    let _ = send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x41));
+    thread::sleep(Duration::from_millis(40));
+    let _ = send_key(VK_BACK);
+    Some(up_index)
+}
+
+fn compact_click_mouseup_index(events: &[&RecordedEvent], start: usize) -> Option<usize> {
+    let mut moves = 0usize;
+    for index in start + 1..events.len() {
+        let event = events[index];
+        if event.kind == "mousedown" {
+            return None;
+        }
+        if event.kind == "mousemove" {
+            moves += 1;
+            if moves > 1 {
+                return None;
+            }
+            continue;
+        }
+        if event.kind == "mouseup" {
+            return Some(index);
+        }
+        return None;
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
 fn replay_keyboard_event(event: &RecordedEvent) -> Result<(), String> {
     let key = event
         .key
@@ -1803,7 +2356,14 @@ fn replay_keyboard_event(_: &RecordedEvent) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn try_uia_named_mousedown(event: &RecordedEvent) -> bool {
-    let Some(name) = event.element_name.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    if is_ableton_event(event) {
+        return false;
+    }
+    let Some(name) = event
+        .element_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     else {
         return false;
     };
@@ -1821,15 +2381,21 @@ fn try_uia_named_mousedown(event: &RecordedEvent) -> bool {
     });
     match receiver.recv_timeout(Duration::from_millis(500)) {
         Ok(Ok(())) => {
-            write_debug_log(&format!("uia invoke/click succeeded: element_name={name:?}"));
+            write_debug_log(&format!(
+                "uia invoke/click succeeded: element_name={name:?}"
+            ));
             true
         }
         Ok(Err(error)) => {
-            write_debug_log(&format!("uia invoke/click failed: element_name={name:?} error={error}"));
+            write_debug_log(&format!(
+                "uia invoke/click failed: element_name={name:?} error={error}"
+            ));
             false
         }
         Err(_) => {
-            write_debug_log(&format!("uia invoke/click timed out: element_name={name:?}"));
+            write_debug_log(&format!(
+                "uia invoke/click timed out: element_name={name:?}"
+            ));
             false
         }
     }
@@ -1840,10 +2406,27 @@ fn try_uia_named_mousedown(_: &RecordedEvent) -> bool {
     false
 }
 
+fn is_ableton_event(event: &RecordedEvent) -> bool {
+    event
+        .window_title
+        .as_deref()
+        .map(|title| title.to_ascii_lowercase().contains("ableton live"))
+        .unwrap_or(false)
+        || event
+            .app_name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains("ableton live"))
+            .unwrap_or(false)
+}
+
 #[cfg(target_os = "windows")]
-fn invoke_or_click_uia_element_by_name(name: &str, window_title: Option<&str>) -> Result<(), String> {
+fn invoke_or_click_uia_element_by_name(
+    name: &str,
+    window_title: Option<&str>,
+) -> Result<(), String> {
     unsafe {
-        let automation = create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
         let hwnd = target_hwnd(window_title);
         if hwnd.0.is_null() {
             return Err("no active window".to_string());
@@ -1857,8 +2440,9 @@ fn invoke_or_click_uia_element_by_name(name: &str, window_title: Option<&str>) -
         let mut point = POINT { x: 0, y: 0 };
         match element.GetClickablePoint(&mut point) {
             Ok(got_clickable) if got_clickable.as_bool() => {
-                SetCursorPos(point.x, point.y)
-                    .map_err(|error| format!("failed to move cursor to UIA element '{name}': {error}"))?;
+                SetCursorPos(point.x, point.y).map_err(|error| {
+                    format!("failed to move cursor to UIA element '{name}': {error}")
+                })?;
                 send_recordable_left_click(point.x, point.y);
                 Ok(())
             }
@@ -1873,7 +2457,11 @@ fn invoke_uia_element(element: &IUIAutomationElement, name: &str) -> Result<(), 
     unsafe {
         let pattern = element
             .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-            .map_err(|error| format!("UIA element '{name}' has no clickable point and no invoke pattern: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "UIA element '{name}' has no clickable point and no invoke pattern: {error}"
+                )
+            })?;
         pattern
             .Invoke()
             .map_err(|error| format!("failed to invoke UIA element '{name}': {error}"))
@@ -1887,7 +2475,9 @@ fn find_uia_element_by_name(
     name: &str,
 ) -> Option<IUIAutomationElement> {
     let exact_value = VARIANT::from(name);
-    if let Ok(condition) = unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &exact_value) } {
+    if let Ok(condition) =
+        unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &exact_value) }
+    {
         if let Ok(element) = unsafe { root.FindFirst(TreeScope_Subtree, &condition) } {
             return Some(element);
         }
@@ -1925,10 +2515,18 @@ fn replay_event_delay(current: &RecordedEvent, next: Option<&RecordedEvent>) -> 
     let Some(next) = next else {
         return Duration::from_millis(20);
     };
-    if current.timestamp_ms == 0 || next.timestamp_ms == 0 || next.timestamp_ms <= current.timestamp_ms {
+    if current.timestamp_ms == 0
+        || next.timestamp_ms == 0
+        || next.timestamp_ms <= current.timestamp_ms
+    {
         return Duration::from_millis(20);
     }
-    let delta_ms = (next.timestamp_ms - current.timestamp_ms).clamp(8, 1000) as u64;
+    let max_delay_ms = if is_ableton_event(current) || is_ableton_event(next) {
+        30_000
+    } else {
+        1_000
+    };
+    let delta_ms = (next.timestamp_ms - current.timestamp_ms).clamp(8, max_delay_ms) as u64;
     Duration::from_millis(delta_ms)
 }
 
@@ -1973,6 +2571,79 @@ fn send_absolute_mouse_input(
 }
 
 #[cfg(target_os = "windows")]
+fn send_ableton_left_click(x: i32, y: i32, hold_delay: Duration) {
+    send_ableton_mousemove(x, y);
+    thread::sleep(Duration::from_millis(8));
+    send_ableton_leftdown(x, y);
+    thread::sleep(hold_delay);
+    send_ableton_leftup(x, y);
+}
+
+#[cfg(target_os = "windows")]
+fn send_ableton_mousemove(x: i32, y: i32) {
+    send_ableton_mouse_input(x, y, MOUSEEVENTF_MOVE);
+}
+
+#[cfg(target_os = "windows")]
+fn send_ableton_leftdown(x: i32, y: i32) {
+    send_ableton_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
+}
+
+#[cfg(target_os = "windows")]
+fn send_ableton_leftup(x: i32, y: i32) {
+    send_ableton_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
+}
+
+#[cfg(target_os = "windows")]
+fn send_ableton_mouse_input(
+    x: i32,
+    y: i32,
+    flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+) {
+    let (dx, dy) = precise_absolute_mouse_coordinates(x, y);
+    unsafe {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: flags | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn send_cursor_mousemove(x: i32, y: i32) {
+    unsafe {
+        let _ = SetCursorPos(x, y);
+        mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn send_cursor_leftdown(x: i32, y: i32) {
+    unsafe {
+        let _ = SetCursorPos(x, y);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn send_cursor_leftup(x: i32, y: i32) {
+    unsafe {
+        let _ = SetCursorPos(x, y);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn absolute_mouse_coordinates(x: i32, y: i32) -> (i32, i32) {
     unsafe {
         let screen_width = GetSystemMetrics(SM_CXSCREEN).max(1);
@@ -1980,6 +2651,20 @@ fn absolute_mouse_coordinates(x: i32, y: i32) -> (i32, i32) {
         (
             (x.clamp(0, screen_width) * 65_535) / screen_width,
             (y.clamp(0, screen_height) * 65_535) / screen_height,
+        )
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn precise_absolute_mouse_coordinates(x: i32, y: i32) -> (i32, i32) {
+    unsafe {
+        let screen_width = GetSystemMetrics(SM_CXSCREEN).max(1) as i64;
+        let screen_height = GetSystemMetrics(SM_CYSCREEN).max(1) as i64;
+        let x = x.clamp(0, screen_width as i32) as i64;
+        let y = y.clamp(0, screen_height as i32) as i64;
+        (
+            (((x * 65_535) + (screen_width / 2)) / screen_width) as i32,
+            (((y * 65_535) + (screen_height / 2)) / screen_height) as i32,
         )
     }
 }
@@ -1995,7 +2680,10 @@ fn send_recordable_left_click(x: i32, y: i32) {
 
 #[cfg(not(target_os = "windows"))]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
-    (json!({"ok": false, "replayed": 0, "target_window": payload.target_window, "error": "mouse replay not implemented on this platform"}), 501)
+    (
+        json!({"ok": false, "replayed": 0, "target_window": payload.target_window, "error": "mouse replay not implemented on this platform"}),
+        501,
+    )
 }
 
 fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i32, i32) {
@@ -2005,6 +2693,93 @@ fn resolve_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i3
         return (x, y);
     }
     (event.x.unwrap_or(0), event.y.unwrap_or(0))
+}
+
+fn resolve_ableton_replay_point(event: &RecordedEvent, rect: Option<&WindowRect>) -> (i32, i32) {
+    resolve_ableton_replay_point_with_note_context(event, rect, false)
+}
+
+fn resolve_ableton_replay_point_with_note_context(
+    event: &RecordedEvent,
+    rect: Option<&WindowRect>,
+    note_grid_context: bool,
+) -> (i32, i32) {
+    let (mut x, mut y) =
+        if let (Some(rect), Some(nx), Some(ny)) = (rect, event.normalized_x, event.normalized_y) {
+            let x = rect.left as f64 + (nx * rect.width as f64);
+            let y = rect.top as f64 + (ny * rect.height as f64);
+            (x.round() as i32, y.round() as i32)
+        } else {
+            (event.x.unwrap_or(0), event.y.unwrap_or(0))
+        };
+
+    if note_grid_context || is_ableton_piano_roll_note_event(event) {
+        y += 14;
+    }
+    if is_ableton_knob_or_eq_event(event) {
+        if let (Some(live_rect), Some(record_rect), Some(record_x), Some(record_y)) =
+            (rect, event.window_rect.as_ref(), event.x, event.y)
+        {
+            x = live_rect.left + (record_x - record_rect.left);
+            y = live_rect.top + (record_y - record_rect.top);
+        }
+    }
+    (x, y)
+}
+
+fn is_ableton_piano_roll_note_event(event: &RecordedEvent) -> bool {
+    if !is_ableton_event(event)
+        || !matches!(event.kind.as_str(), "mousedown" | "mousemove" | "mouseup")
+    {
+        return false;
+    }
+    let name = event
+        .element_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.contains("untitled clip")
+        && name.contains("track")
+        && event.normalized_y.map(|y| y > 0.50).unwrap_or(false)
+}
+
+fn is_ableton_knob_or_eq_event(event: &RecordedEvent) -> bool {
+    if !is_ableton_event(event) {
+        return false;
+    }
+    let name = event
+        .element_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.contains("frequency")
+        || name.contains("resonance")
+        || name.contains("gain")
+        || name.contains("eq")
+        || name.contains("filter")
+        || name.contains("threshold")
+        || name.contains("output gain")
+        || name.contains("fine frequency")
+}
+
+fn is_ableton_automation_record_event(event: &RecordedEvent) -> bool {
+    if !is_ableton_event(event) {
+        return false;
+    }
+    if event
+        .element_name
+        .as_deref()
+        .map(|name| name.eq_ignore_ascii_case("Arrangement Record"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    matches!(event.kind.as_str(), "mousedown" | "mouseup")
+        && event
+            .normalized_x
+            .zip(event.normalized_y)
+            .map(|(x, y)| (x - 0.46436).abs() < 0.004 && (y - 0.07275).abs() < 0.006)
+            .unwrap_or(false)
 }
 
 fn is_colour_select_event(event: &RecordedEvent) -> bool {
@@ -2072,8 +2847,7 @@ fn resolve_target_replay_rect(payload: &MouseReplayRequest) -> Result<WindowRect
         .ok_or_else(|| "gesture replay needs a target window title".to_string())?;
     let hwnd = find_window_containing(&title)
         .ok_or_else(|| format!("no visible top-level window contains '{title}'"))?;
-    window_rect_for_hwnd(hwnd)
-        .ok_or_else(|| format!("failed to get window rect for '{title}'"))
+    window_rect_for_hwnd(hwnd).ok_or_else(|| format!("failed to get window rect for '{title}'"))
 }
 
 fn first_valid_event_window_title(events: &[RecordedEvent]) -> Option<String> {
@@ -2145,7 +2919,10 @@ fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
         }
 
         let colour = GetPixel(mem_dc, 0, 0);
-        eprintln!("[Marouba] Raw COLORREF sampled at ({x}, {y}): 0x{:08X}", colour.0);
+        eprintln!(
+            "[Marouba] Raw COLORREF sampled at ({x}, {y}): 0x{:08X}",
+            colour.0
+        );
         let _ = SelectObject(mem_dc, old_object);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(mem_dc);
@@ -2189,20 +2966,35 @@ fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRe
 #[cfg(target_os = "windows")]
 fn find_paint_window(payload: &MouseReplayRequest) -> Option<(HWND, WindowRect)> {
     let mut candidates = Vec::new();
-    if let Some(target) = payload.target_window.as_deref().filter(|value| title_is_ms_paint(value)) {
+    if let Some(target) = payload
+        .target_window
+        .as_deref()
+        .filter(|value| title_is_ms_paint(value))
+    {
         candidates.push(target.to_string());
     }
-    if let Some(app) = payload.workflow_app.as_deref().filter(|value| title_is_ms_paint(value)) {
+    if let Some(app) = payload
+        .workflow_app
+        .as_deref()
+        .filter(|value| title_is_ms_paint(value))
+    {
         candidates.push(app.to_string());
     }
-    if let Some(title) = first_valid_event_window_title(&payload.events)
-        .filter(|value| title_is_ms_paint(value))
+    if let Some(title) =
+        first_valid_event_window_title(&payload.events).filter(|value| title_is_ms_paint(value))
     {
         candidates.push(title);
     }
     for event in &payload.events {
-        if let Some(title) = event.window_title.as_deref().filter(|value| title_is_ms_paint(value)) {
-            if !candidates.iter().any(|candidate| candidate.eq_ignore_ascii_case(title)) {
+        if let Some(title) = event
+            .window_title
+            .as_deref()
+            .filter(|value| title_is_ms_paint(value))
+        {
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(title))
+            {
                 candidates.push(title.to_string());
             }
         }
@@ -2262,9 +3054,12 @@ fn parse_colour_hex(value: &str) -> Result<(u8, u8, u8), String> {
     if hex.len() != 6 {
         return Err(format!("invalid colour hex '{value}'"));
     }
-    let red = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("invalid red value in '{value}'"))?;
-    let green = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("invalid green value in '{value}'"))?;
-    let blue = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("invalid blue value in '{value}'"))?;
+    let red = u8::from_str_radix(&hex[0..2], 16)
+        .map_err(|_| format!("invalid red value in '{value}'"))?;
+    let green = u8::from_str_radix(&hex[2..4], 16)
+        .map_err(|_| format!("invalid green value in '{value}'"))?;
+    let blue = u8::from_str_radix(&hex[4..6], 16)
+        .map_err(|_| format!("invalid blue value in '{value}'"))?;
     Ok((red, green, blue))
 }
 
@@ -2289,6 +3084,16 @@ fn send_modified_key(modifier: VIRTUAL_KEY, key: VIRTUAL_KEY) -> Result<(), Stri
     send_key_down(modifier)?;
     send_key(key)?;
     send_key_up(modifier)
+}
+
+#[cfg(target_os = "windows")]
+fn send_ableton_insert_midi_track() -> Result<(), String> {
+    write_debug_log("ableton insert MIDI track: Ctrl+Shift+T");
+    send_key_down(VK_CONTROL)?;
+    send_key_down(VK_SHIFT)?;
+    send_key(VIRTUAL_KEY(0x54))?;
+    send_key_up(VK_SHIFT)?;
+    send_key_up(VK_CONTROL)
 }
 
 #[cfg(target_os = "windows")]
@@ -2441,7 +3246,8 @@ fn click_uia_impl(payload: UiaRequest) -> (Value, u16) {
 #[cfg(target_os = "windows")]
 fn find_uia_element(payload: &UiaRequest) -> Result<(IUIAutomationElement, String), String> {
     unsafe {
-        let automation = create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
 
         if let (Some(x), Some(y)) = (payload.x, payload.y) {
             let window_title = active_window_title();
@@ -2461,7 +3267,11 @@ fn find_uia_element(payload: &UiaRequest) -> Result<(IUIAutomationElement, Strin
             .ElementFromHandle(hwnd)
             .map_err(|error| format!("failed to read active window UIA tree: {error}"))?;
 
-        if let Some(name) = payload.name.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(name) = payload
+            .name
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             let value = VARIANT::from(name.as_str());
             let condition = automation
                 .CreatePropertyCondition(UIA_NamePropertyId, &value)
@@ -2478,7 +3288,10 @@ fn find_uia_element(payload: &UiaRequest) -> Result<(IUIAutomationElement, Strin
 
 #[cfg(target_os = "windows")]
 fn target_hwnd(window_title: Option<&str>) -> HWND {
-    if let Some(title) = window_title.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(title) = window_title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         if let Some(hwnd) = find_window_containing(title) {
             return hwnd;
         }
@@ -2510,7 +3323,10 @@ fn element_json(element: &IUIAutomationElement, window_title: &str, payload: &Ui
             .CurrentName()
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let control_type = element.CurrentControlType().map(|value| value.0).unwrap_or(0);
+        let control_type = element
+            .CurrentControlType()
+            .map(|value| value.0)
+            .unwrap_or(0);
         let rect = element.CurrentBoundingRectangle().ok();
         let bounding_rect = rect.map(|value| {
             json!({
@@ -2709,7 +3525,10 @@ fn shell_execute(file: &str) -> Result<(), String> {
             SW_SHOWNORMAL,
         );
         if (result.0 as isize) <= 32 {
-            Err(format!("ShellExecuteW failed with code {}", result.0 as isize))
+            Err(format!(
+                "ShellExecuteW failed with code {}",
+                result.0 as isize
+            ))
         } else {
             Ok(())
         }
@@ -2732,7 +3551,11 @@ struct WorkflowMetadata {
 }
 
 fn describe_with_claude(name: &str, events: &[RecordedEvent]) -> WorkflowMetadata {
-    if std::env::var("ANTHROPIC_API_KEY").ok().filter(|value| !value.trim().is_empty()).is_none() {
+    if std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
         return fallback_metadata(name, events);
     }
     call_claude_summary(name, events).unwrap_or_else(|| fallback_metadata(name, events))
@@ -2779,24 +3602,44 @@ fn call_claude_summary(name: &str, events: &[RecordedEvent]) -> Option<WorkflowM
     let tags = parsed
         .get("tags")
         .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).map(slugify).collect())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(slugify)
+                .collect()
+        })
         .unwrap_or_else(|| vec!["tray".to_string(), "recorded".to_string()]);
     Some(WorkflowMetadata { description, tags })
 }
 
 fn fallback_metadata(name: &str, events: &[RecordedEvent]) -> WorkflowMetadata {
-    let apps: HashSet<String> = events.iter().filter_map(|event| event.app_name.clone()).collect();
+    let apps: HashSet<String> = events
+        .iter()
+        .filter_map(|event| event.app_name.clone())
+        .collect();
     WorkflowMetadata {
-        description: format!("Tray-recorded workflow '{}' with {} captured events.", name, events.len()),
+        description: format!(
+            "Tray-recorded workflow '{}' with {} captured events.",
+            name,
+            events.len()
+        ),
         tags: vec![
             "tray".to_string(),
             "recorded".to_string(),
-            apps.iter().next().map(|value| slugify(value)).unwrap_or_else(|| "workflow".to_string()),
+            apps.iter()
+                .next()
+                .map(|value| slugify(value))
+                .unwrap_or_else(|| "workflow".to_string()),
         ],
     }
 }
 
-fn write_workflow(name: &str, events: &[RecordedEvent], metadata: WorkflowMetadata) -> Result<PathBuf, String> {
+fn write_workflow(
+    name: &str,
+    events: &[RecordedEvent],
+    metadata: WorkflowMetadata,
+) -> Result<PathBuf, String> {
     let id = slugify(name);
     let today = current_date_string();
     let app = workflow_app_from_events(events);
@@ -2845,14 +3688,20 @@ depends_on: []\n\
 }
 
 fn workflow_app_from_events(events: &[RecordedEvent]) -> String {
-    for event in events.iter().filter(|event| !is_empty_unknown_system_event(event)) {
+    for event in events
+        .iter()
+        .filter(|event| !is_empty_unknown_system_event(event))
+    {
         if let Some(app_name) = event.app_name.as_deref().map(str::trim) {
             if !app_name.is_empty() && !app_name.eq_ignore_ascii_case("unknown") {
                 return app_name.to_string();
             }
         }
     }
-    for event in events.iter().filter(|event| !is_empty_unknown_system_event(event)) {
+    for event in events
+        .iter()
+        .filter(|event| !is_empty_unknown_system_event(event))
+    {
         if let Some(window_title) = event.window_title.as_deref().map(str::trim) {
             if !window_title.is_empty() {
                 return window_title.to_string();
@@ -2895,7 +3744,11 @@ fn slugify(value: &str) -> String {
         }
     }
     let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() { "workflow".to_string() } else { slug }
+    if slug.is_empty() {
+        "workflow".to_string()
+    } else {
+        slug
+    }
 }
 
 fn current_date_string() -> String {
