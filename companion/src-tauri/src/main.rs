@@ -939,13 +939,19 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
 
 fn replay_target_windows(name: &str, events: &[RecordedEvent]) -> Vec<String> {
     let mut candidates = Vec::new();
-    if let Some(app_name) = parse_workflow_app_name(name) {
-        push_unique_window(&mut candidates, app_name);
-    }
     for event in events {
         if let Some(title) = event.window_title.as_ref() {
             push_unique_window(&mut candidates, title.clone());
+            if let Some(app_name) = app_name_hint_from_window_title(title) {
+                push_unique_window(&mut candidates, app_name);
+            }
         }
+        if let Some(app_name) = event.app_name.as_ref() {
+            push_unique_window(&mut candidates, app_name.clone());
+        }
+    }
+    if let Some(app_name) = parse_workflow_app_name(name) {
+        push_unique_window(&mut candidates, app_name);
     }
     candidates.sort_by_key(|title| if is_known_creative_window(title) { 0 } else { 1 });
     candidates
@@ -963,9 +969,37 @@ fn push_unique_window(candidates: &mut Vec<String>, title: String) {
 
 fn is_known_creative_window(title: &str) -> bool {
     let lower = title.to_ascii_lowercase();
-    ["paint", "photoshop", "ableton", "blender", "comfyui", "chrome", "edge"]
+    ["paint", "notepad++", "photoshop", "ableton", "blender", "comfyui", "chrome", "edge"]
         .iter()
         .any(|needle| lower.contains(needle))
+}
+
+fn app_name_hint_from_window_title(title: &str) -> Option<String> {
+    let title = title.trim().trim_start_matches('*').trim();
+    if title.is_empty() {
+        return None;
+    }
+    title
+        .rsplit_once(" - ")
+        .map(|(_, app)| app.trim().trim_start_matches('*').trim().to_string())
+        .filter(|app| !app.is_empty())
+}
+
+fn app_name_hints_for_targets(candidates: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    for candidate in candidates {
+        if let Some(app_name) = app_name_hint_from_window_title(candidate) {
+            push_unique_window(&mut hints, app_name);
+        }
+        push_unique_window(&mut hints, candidate.trim_start_matches('*').trim().to_string());
+    }
+    hints
+}
+
+fn display_app_name_for_targets(candidates: &[String]) -> Option<String> {
+    app_name_hints_for_targets(candidates)
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
 }
 
 #[cfg(target_os = "windows")]
@@ -973,16 +1007,29 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
     if let Ok(window_title) = focus_first_available_window(candidates) {
         return Ok(window_title);
     }
+    if let Ok(window_title) = focus_running_process_for_targets(candidates) {
+        return Ok(window_title);
+    }
     let app = launchable_app_for_targets(candidates)
-        .ok_or_else(|| format!("Could not launch the target app. Please open it manually."))?;
+        .ok_or_else(|| {
+            let app_name = display_app_name_for_targets(candidates)
+                .unwrap_or_else(|| "the target app".to_string());
+            format!("Could not find {app_name} — please open it manually and retry")
+        })?;
     launch_app(&app)?;
-    for _ in 0..6 {
+    for _ in 0..12 {
         thread::sleep(Duration::from_millis(500));
         if let Ok(window_title) = focus_first_available_window(candidates) {
             return Ok(window_title);
         }
+        if let Ok(window_title) = focus_running_process_for_targets(candidates) {
+            return Ok(window_title);
+        }
     }
-    Err(format!("Could not launch {}. Please open it manually.", app.display_name))
+    Err(format!(
+        "Could not find {} — please open it manually and retry",
+        app.display_name
+    ))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -992,33 +1039,211 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 struct LaunchableApp {
-    display_name: &'static str,
-    executable: &'static str,
+    display_name: String,
+    executable: String,
 }
 
 #[cfg(target_os = "windows")]
 fn launchable_app_for_targets(candidates: &[String]) -> Option<LaunchableApp> {
-    candidates.iter().find_map(|candidate| {
-        let lower = candidate.to_ascii_lowercase();
+    for app_name in app_name_hints_for_targets(candidates) {
+        let lower = app_name.to_ascii_lowercase();
         if lower.contains("paint") {
-            Some(LaunchableApp {
-                display_name: "Paint",
-                executable: "mspaint.exe",
-            })
-        } else {
-            None
+            return Some(LaunchableApp {
+                display_name: "Paint".to_string(),
+                executable: "mspaint.exe".to_string(),
+            });
         }
-    })
+        if lower.contains("notepad++") {
+            for path in [
+                r"C:\Program Files\Notepad++\notepad++.exe",
+                r"C:\Program Files (x86)\Notepad++\notepad++.exe",
+            ] {
+                if PathBuf::from(path).is_file() {
+                    return Some(LaunchableApp {
+                        display_name: "Notepad++".to_string(),
+                        executable: path.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(path) = find_matching_executable(&app_name) {
+            return Some(LaunchableApp {
+                display_name: app_name,
+                executable: path,
+            });
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
 fn launch_app(app: &LaunchableApp) -> Result<(), String> {
-    shell_execute(app.executable).map_err(|error| {
+    if app.executable.to_ascii_lowercase().ends_with("notepad++.exe") {
+        let escaped_path = app.executable.replace('\'', "''");
+        let script = format!("Start-Process -FilePath '{}' -ArgumentList '-multiInst'", escaped_path);
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", &script]);
+        let output = no_window_command(&mut command).output().map_err(|error| {
+            format!(
+                "Could not launch {}. Please open it manually. ({error})",
+                app.display_name
+            )
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "Could not launch {}. Please open it manually. ({})",
+            app.display_name,
+            if stderr.is_empty() { "launcher returned a failure" } else { &stderr }
+        ));
+    }
+    shell_execute(&app.executable).map_err(|error| {
         format!(
             "Could not launch {}. Please open it manually. ({error})",
             app.display_name
         )
     })
+}
+
+#[cfg(target_os = "windows")]
+fn focus_running_process_for_targets(candidates: &[String]) -> Result<String, String> {
+    for app_name in app_name_hints_for_targets(candidates) {
+        let process_name = executable_stem_hint(&app_name);
+        if process_name.is_empty() {
+            continue;
+        }
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -like $args[0] } | Select-Object -First 1 -ExpandProperty MainWindowTitle",
+            &format!("*{process_name}*"),
+        ]);
+        let output = no_window_command(&mut command).output();
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        if focus_target_window(&title).is_ok() {
+            return Ok(title);
+        }
+    }
+    Err("no matching running process with a visible window".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn find_matching_executable(app_name: &str) -> Option<String> {
+    let wanted = normalize_app_name(app_name);
+    if wanted.is_empty() {
+        return None;
+    }
+    let exact_exe = format!("{}.exe", executable_stem_hint(app_name));
+    if command_exists(&exact_exe) {
+        return Some(exact_exe);
+    }
+
+    let mut roots = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "APPDATA"] {
+        if let Ok(path) = std::env::var(key) {
+            push_unique_path(&mut roots, PathBuf::from(path));
+        }
+    }
+    push_unique_path(&mut roots, PathBuf::from(r"C:\Program Files"));
+    push_unique_path(&mut roots, PathBuf::from(r"C:\Program Files (x86)"));
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        push_unique_path(&mut roots, PathBuf::from(userprofile).join("AppData"));
+    }
+
+    for root in &roots {
+        let direct = root.join(app_name.trim()).join(&exact_exe);
+        if direct.is_file() {
+            return Some(direct.display().to_string());
+        }
+    }
+
+    let mut best: Option<String> = None;
+    for root in roots {
+        if let Some(path) = find_executable_in_tree(&root, &wanted, 40_000) {
+            best = Some(path);
+            break;
+        }
+    }
+    best
+}
+
+#[cfg(target_os = "windows")]
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_executable_in_tree(root: &PathBuf, wanted: &str, max_entries: usize) -> Option<String> {
+    let mut stack = vec![root.clone()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > max_entries {
+                return None;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case("exe")) != Some(true) {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(normalize_app_name)
+                .unwrap_or_default();
+            if stem == wanted || stem.contains(wanted) || wanted.contains(&stem) {
+                return Some(path.display().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn executable_stem_hint(app_name: &str) -> String {
+    let lower = app_name.trim().trim_start_matches('*').to_ascii_lowercase();
+    if lower.contains("notepad++") {
+        "notepad++".to_string()
+    } else if lower.contains("paint") {
+        "mspaint".to_string()
+    } else {
+        app_name
+            .trim()
+            .trim_start_matches('*')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '+' && ch != '-' && ch != '_')
+            .to_string()
+    }
+}
+
+fn normalize_app_name(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '+')
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -1344,11 +1569,25 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let replay_events: Vec<&RecordedEvent> = payload
         .events
         .iter()
-        .filter(|e| matches!(e.kind.as_str(), "mousemove" | "mousedown" | "mouseup"))
+        .filter(|e| matches!(e.kind.as_str(), "mousemove" | "mousedown" | "mouseup" | "keydown" | "keyup"))
         .collect();
     let mut index = 0usize;
     while index < replay_events.len() {
         let event = replay_events[index];
+        if matches!(event.kind.as_str(), "keydown" | "keyup") {
+            if let Some(target) = payload.target_window.as_deref() {
+                let _ = focus_target_window(target);
+            }
+            if replay_keyboard_event(event).is_ok() {
+                replayed += 1;
+            }
+            thread::sleep(replay_event_delay(
+                event,
+                replay_events.get(index + 1).copied(),
+            ));
+            index += 1;
+            continue;
+        }
         if event.kind == "mousemove" && normalized_event_outside_window(event) {
             index += 1;
             continue;
@@ -1539,6 +1778,27 @@ fn normalized_distance(start: &RecordedEvent, end: &RecordedEvent) -> Option<f64
     let dx = end.normalized_x? - start.normalized_x?;
     let dy = end.normalized_y? - start.normalized_y?;
     Some((dx * dx + dy * dy).sqrt())
+}
+
+#[cfg(target_os = "windows")]
+fn replay_keyboard_event(event: &RecordedEvent) -> Result<(), String> {
+    let key = event
+        .key
+        .as_deref()
+        .ok_or_else(|| "keyboard event missing key".to_string())?
+        .parse::<u16>()
+        .map_err(|error| format!("invalid keyboard key: {error}"))?;
+    let flags = if event.kind == "keyup" {
+        KEYEVENTF_KEYUP
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    };
+    send_keyboard_input(VIRTUAL_KEY(key), flags)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replay_keyboard_event(_: &RecordedEvent) -> Result<(), String> {
+    Err("keyboard replay not implemented on this platform".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -2300,7 +2560,9 @@ fn app_name_from_title(title: &str) -> String {
         return "unknown".to_string();
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("paint") {
+    if lower.contains("notepad++") {
+        "Notepad++".to_string()
+    } else if lower.contains("paint") {
         "MS Paint".to_string()
     } else if lower.contains("notepad") {
         "Notepad".to_string()
