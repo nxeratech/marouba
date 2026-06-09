@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod classifier;
+mod route_switcher;
 
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -1688,9 +1689,50 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             )
         })
         .collect();
+    let profile_window_title = payload
+        .target_window
+        .as_deref()
+        .or_else(|| {
+            payload
+                .events
+                .iter()
+                .find_map(|event| event.window_title.as_deref())
+        })
+        .unwrap_or("");
+    let app_profile = route_switcher::load_app_profile(profile_window_title);
+    if let Some(profile) = app_profile.as_ref() {
+        write_debug_log(&format!(
+            "route switcher profile loaded: app={} title_fragment={}",
+            profile.app_name, profile.title_fragment
+        ));
+    } else {
+        write_debug_log(&format!(
+            "route switcher profile not found for title={profile_window_title:?}; using coordinates"
+        ));
+    }
     let mut index = 0usize;
     while index < replay_events.len() {
         let event = replay_events[index];
+        let event_type = classifier::classify_event(&payload.events, source_event_index(&payload.events, event));
+        let selected_route =
+            route_switcher::select_route_for_event(&event_type, event, app_profile.as_ref());
+        write_debug_log(&format!(
+            "route decision: event_index={} event_type={} route={} element_name={:?}",
+            index,
+            route_switcher::event_type_key(&event_type),
+            route_debug_name(&selected_route),
+            event.element_name
+        ));
+        if let route_switcher::Route::Api(endpoint) = &selected_route {
+            write_debug_log(&format!(
+                "API route planned for {} endpoint={} - falling back to coordinates",
+                app_profile
+                    .as_ref()
+                    .map(|profile| profile.app_name.as_str())
+                    .unwrap_or("unknown app"),
+                endpoint
+            ));
+        }
         if matches!(event.kind.as_str(), "keydown" | "keyup") {
             if let Some(target) = payload
                 .target_window
@@ -1699,7 +1741,13 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             {
                 let _ = focus_target_window(target);
             }
-            if replay_keyboard_event(event).is_ok() {
+            let keyboard_result = match &selected_route {
+                route_switcher::Route::KeyboardShortcut(keys) if event.kind == "keydown" => {
+                    send_shortcut_keys(keys)
+                }
+                _ => replay_keyboard_event(event),
+            };
+            if keyboard_result.is_ok() {
                 replayed += 1;
             }
             thread::sleep(replay_event_delay(
@@ -1833,7 +1881,10 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     continue;
                 }
             }
-            if !left_button_down && try_uia_named_mousedown(event) {
+            if !left_button_down
+                && matches!(selected_route, route_switcher::Route::UIA)
+                && try_uia_named_mousedown(event)
+            {
                 skipped_uia_mousedown = true;
                 replayed += 1;
                 thread::sleep(replay_event_delay(
@@ -2417,6 +2468,22 @@ fn is_ableton_event(event: &RecordedEvent) -> bool {
             .as_deref()
             .map(|name| name.to_ascii_lowercase().contains("ableton live"))
             .unwrap_or(false)
+}
+
+fn source_event_index(events: &[RecordedEvent], target: &RecordedEvent) -> usize {
+    events
+        .iter()
+        .position(|event| std::ptr::eq(event, target))
+        .unwrap_or(0)
+}
+
+fn route_debug_name(route: &route_switcher::Route) -> String {
+    match route {
+        route_switcher::Route::UIA => "uia".to_string(),
+        route_switcher::Route::KeyboardShortcut(keys) => format!("shortcut({keys})"),
+        route_switcher::Route::Coordinates => "coordinates".to_string(),
+        route_switcher::Route::Api(endpoint) => format!("api({endpoint})"),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3084,6 +3151,42 @@ fn send_modified_key(modifier: VIRTUAL_KEY, key: VIRTUAL_KEY) -> Result<(), Stri
     send_key_down(modifier)?;
     send_key(key)?;
     send_key_up(modifier)
+}
+
+#[cfg(target_os = "windows")]
+fn send_shortcut_keys(keys: &str) -> Result<(), String> {
+    let mut modifiers = Vec::new();
+    let mut primary = None;
+    for part in keys.split('+').map(str::trim).filter(|part| !part.is_empty()) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers.push(VK_CONTROL),
+            "shift" => modifiers.push(VK_SHIFT),
+            "alt" => modifiers.push(VK_MENU),
+            "enter" | "return" => primary = Some(VK_RETURN),
+            "tab" => primary = Some(VK_TAB),
+            "backspace" => primary = Some(VK_BACK),
+            "space" => primary = Some(VIRTUAL_KEY(0x20)),
+            value if value.len() == 1 => {
+                primary = Some(VIRTUAL_KEY(value.as_bytes()[0].to_ascii_uppercase() as u16));
+            }
+            value => return Err(format!("unsupported shortcut key: {value}")),
+        }
+    }
+    let primary = primary.ok_or_else(|| format!("shortcut has no primary key: {keys}"))?;
+    write_debug_log(&format!("route switcher sending shortcut: {keys}"));
+    for modifier in &modifiers {
+        send_key_down(*modifier)?;
+    }
+    send_key(primary)?;
+    for modifier in modifiers.iter().rev() {
+        send_key_up(*modifier)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn send_shortcut_keys(_: &str) -> Result<(), String> {
+    Err("shortcut replay not implemented on this platform".to_string())
 }
 
 #[cfg(target_os = "windows")]
