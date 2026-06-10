@@ -3147,21 +3147,14 @@ fn prepare_ableton_note_replay_context(
         let _ = focus_target_window(target);
     }
     thread::sleep(Duration::from_millis(120));
+    write_debug_log("=== ABLETON NOTE PREFLIGHT ===");
 
-    if let Some((x, y)) = ableton_piano_roll_focus_point(
-        payload.target_window.as_deref().or_else(|| {
-            payload
-                .events
-                .iter()
-                .find_map(|event| event.window_title.as_deref())
-        }),
-        replay_rect,
-    ) {
+    if let Some((x, y)) = ableton_piano_roll_focus_point(replay_rect) {
         write_debug_log(&format!(
-            "ableton note replay preflight: clicking piano roll grid at ({x},{y})"
+            "ableton note replay preflight: clicking geometry grid point at ({x},{y})"
         ));
         send_ableton_left_click(x, y, Duration::from_millis(60));
-        thread::sleep(Duration::from_millis(300));
+        thread::sleep(Duration::from_millis(400));
     } else {
         write_debug_log("ableton note replay preflight: no grid point available");
     }
@@ -3177,223 +3170,12 @@ fn prepare_ableton_note_replay_context(
     }
 }
 
-fn ableton_piano_roll_focus_point(
-    window_title: Option<&str>,
-    rect: Option<&WindowRect>,
-) -> Option<(i32, i32)> {
-    match ableton_piano_roll_grid_point_with_timeout(window_title, 700) {
-        Ok(point) => {
-            write_debug_log(&format!(
-                "ableton note replay preflight: UIA grid point selected at ({},{})",
-                point.0, point.1
-            ));
-            Some(point)
-        }
-        Err(error) => {
-            write_debug_log(&format!(
-                "ableton note replay preflight: UIA grid lookup unavailable: {error}; using safe lower-grid fallback"
-            ));
-            ableton_piano_roll_fallback_focus_point(rect)
-        }
-    }
-}
-
-fn ableton_piano_roll_fallback_focus_point(rect: Option<&WindowRect>) -> Option<(i32, i32)> {
+fn ableton_piano_roll_focus_point(rect: Option<&WindowRect>) -> Option<(i32, i32)> {
     let rect = rect?;
     Some((
-        rect.left + ((rect.width as f64) * 0.60).round() as i32,
-        rect.top + ((rect.height as f64) * 0.88).round() as i32,
+        rect.left + ((rect.width as f64) * 0.65).round() as i32,
+        rect.top + ((rect.height as f64) * 0.65).round() as i32,
     ))
-}
-
-#[cfg(target_os = "windows")]
-fn ableton_piano_roll_grid_point_with_timeout(
-    window_title: Option<&str>,
-    timeout_ms: u64,
-) -> Result<(i32, i32), String> {
-    let (sender, receiver) = mpsc::channel();
-    let worker_window_title = window_title.map(str::to_string);
-    thread::spawn(move || {
-        let result = ableton_piano_roll_grid_point(worker_window_title.as_deref());
-        let _ = sender.send(result);
-    });
-    match receiver.recv_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "Ableton piano roll UIA lookup timed out after {timeout_ms}ms"
-        )),
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn ableton_piano_roll_grid_point_with_timeout(
-    _: Option<&str>,
-    _: u64,
-) -> Result<(i32, i32), String> {
-    Err("Ableton piano roll UIA lookup is not implemented on this platform".to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn ableton_piano_roll_grid_point(window_title: Option<&str>) -> Result<(i32, i32), String> {
-    unsafe {
-        let automation =
-            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
-        let hwnd = target_hwnd(window_title);
-        if hwnd.0.is_null() {
-            return Err("no Ableton window available for UIA grid lookup".to_string());
-        }
-        let root = automation
-            .ElementFromHandle(hwnd)
-            .map_err(|error| format!("failed to read Ableton UIA root: {error}"))?;
-        let root_rect = root
-            .CurrentBoundingRectangle()
-            .map_err(|error| format!("Ableton root has no UIA rect: {error}"))?;
-        let root_rect = WindowRect {
-            left: root_rect.left,
-            top: root_rect.top,
-            width: root_rect.right - root_rect.left,
-            height: root_rect.bottom - root_rect.top,
-        };
-        let walker = automation
-            .ControlViewWalker()
-            .map_err(|error| format!("failed to create Ableton UIA walker: {error}"))?;
-        let mut stack = vec![root];
-        let mut best: Option<(WindowRect, i64, Vec<String>, i32)> = None;
-        let mut visited = 0usize;
-        while let Some(element) = stack.pop() {
-            visited += 1;
-            if visited > 1400 {
-                break;
-            }
-
-            if let Ok(rect) = element.CurrentBoundingRectangle() {
-                let rect = WindowRect {
-                    left: rect.left,
-                    top: rect.top,
-                    width: rect.right - rect.left,
-                    height: rect.bottom - rect.top,
-                };
-                let names = uia_element_names(&element);
-                let control_type = element
-                    .CurrentControlType()
-                    .map(|value| value.0)
-                    .unwrap_or_default();
-                if ableton_uia_rect_is_piano_roll_candidate(&root_rect, &rect, &names) {
-                    let score = ableton_piano_roll_candidate_score(&root_rect, &rect, control_type);
-                    if best
-                        .as_ref()
-                        .map(|(_, best_score, _, _)| score > *best_score)
-                        .unwrap_or(true)
-                    {
-                        best = Some((rect, score, names, control_type));
-                    }
-                }
-            }
-
-            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
-                let mut siblings = vec![first_child.clone()];
-                let mut current = first_child;
-                while let Ok(next) = walker.GetNextSiblingElement(&current) {
-                    siblings.push(next.clone());
-                    current = next;
-                }
-                for child in siblings.into_iter().rev() {
-                    stack.push(child);
-                }
-            }
-        }
-
-        let Some((rect, score, names, control_type)) = best else {
-            return Err(format!(
-                "no plausible Ableton piano roll grid candidate found after {visited} UIA elements"
-            ));
-        };
-        let point = ableton_safe_point_inside_grid_rect(&rect);
-        write_debug_log(&format!(
-            "ableton piano roll UIA candidate: rect={} point=({}, {}) score={} control_type={} names={:?}",
-            format_window_rect(Some(&rect)),
-            point.0,
-            point.1,
-            score,
-            control_type,
-            names
-        ));
-        Ok(point)
-    }
-}
-
-fn ableton_uia_rect_is_piano_roll_candidate(
-    root: &WindowRect,
-    rect: &WindowRect,
-    names: &[String],
-) -> bool {
-    if rect.width <= 260 || rect.height <= 90 {
-        return false;
-    }
-    if rect.width >= root.width - 8 && rect.height >= root.height - 8 {
-        return false;
-    }
-    let lower_limit = root.top + ((root.height as f64) * 0.42).round() as i32;
-    let bottom_limit = root.top + root.height;
-    let center_y = rect.top + rect.height / 2;
-    if center_y < lower_limit || rect.top >= bottom_limit {
-        return false;
-    }
-    if rect.left < root.left - 4 || rect.top < root.top - 4 {
-        return false;
-    }
-    if rect.left + rect.width > root.left + root.width + 4 {
-        return false;
-    }
-    if rect.top + rect.height > root.top + root.height + 4 {
-        return false;
-    }
-    !names
-        .iter()
-        .any(|name| ableton_name_is_piano_roll_toolbar(name))
-}
-
-fn ableton_piano_roll_candidate_score(
-    root: &WindowRect,
-    rect: &WindowRect,
-    control_type: i32,
-) -> i64 {
-    let mut score = (rect.width.max(0) as i64) * (rect.height.max(0) as i64);
-    if rect.top > root.top + ((root.height as f64) * 0.50).round() as i32 {
-        score += 2_000_000;
-    }
-    if rect.width > ((root.width as f64) * 0.45).round() as i32 {
-        score += 1_000_000;
-    }
-    if matches!(control_type, 50025 | 50030 | 50033) {
-        score += 500_000;
-    }
-    score
-}
-
-fn ableton_safe_point_inside_grid_rect(rect: &WindowRect) -> (i32, i32) {
-    let inset_x = rect.width.clamp(80, 220) as f64;
-    let x = rect.left + (((rect.width as f64) * 0.60).max(inset_x)).round() as i32;
-    let y = rect.top + ((rect.height as f64) * 0.62).round() as i32;
-    (
-        x.clamp(rect.left + 20, rect.left + rect.width - 20),
-        y.clamp(rect.top + 20, rect.top + rect.height - 20),
-    )
-}
-
-fn ableton_name_is_piano_roll_toolbar(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "fold"
-            | "scale"
-            | "highlight scale"
-            | "notes"
-            | "envelopes"
-            | "mpe"
-            | "show/hide envelopes"
-            | "search"
-    )
 }
 
 fn ableton_vault_indicates_transport_running(events: &[&RecordedEvent]) -> bool {
