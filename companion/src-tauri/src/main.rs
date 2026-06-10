@@ -1954,6 +1954,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let mut ableton_note_grid_mouse_down = false;
     let mut ableton_added_devices: Vec<String> = Vec::new();
     let mut logged_first_canvas_mousemove = false;
+    let mut ableton_note_context_prepared = false;
     let replay_events: Vec<&RecordedEvent> = payload
         .events
         .iter()
@@ -2019,6 +2020,18 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             event.kind.as_str(),
             "keydown" | "keyup" | "note_on" | "note_off"
         ) {
+            if is_ableton_event(event)
+                && is_ableton_note_keyboard_event(event)
+                && !ableton_note_context_prepared
+            {
+                prepare_ableton_note_replay_context(
+                    &payload,
+                    &replay_events,
+                    index,
+                    replay_rect.as_ref(),
+                );
+                ableton_note_context_prepared = true;
+            }
             if let Some(target) = payload
                 .target_window
                 .as_deref()
@@ -3099,6 +3112,92 @@ fn replay_keyboard_event(event: &RecordedEvent) -> Result<(), String> {
         KEYBD_EVENT_FLAGS(0)
     };
     send_keyboard_input(VIRTUAL_KEY(key), flags)
+}
+
+fn is_ableton_note_keyboard_event(event: &RecordedEvent) -> bool {
+    if !is_ableton_event(event) {
+        return false;
+    }
+    if matches!(event.kind.as_str(), "note_on" | "note_off") {
+        return true;
+    }
+    event
+        .semantic
+        .as_deref()
+        .map(|value| {
+            value
+                .split(';')
+                .any(|part| part.trim().starts_with("midi_note:"))
+        })
+        .unwrap_or(false)
+}
+
+fn prepare_ableton_note_replay_context(
+    payload: &MouseReplayRequest,
+    events: &[&RecordedEvent],
+    current_index: usize,
+    replay_rect: Option<&WindowRect>,
+) {
+    if let Some(target) = payload.target_window.as_deref().or_else(|| {
+        payload
+            .events
+            .iter()
+            .find_map(|event| event.window_title.as_deref())
+    }) {
+        let _ = focus_target_window(target);
+    }
+    thread::sleep(Duration::from_millis(120));
+
+    if let Some((x, y)) = ableton_piano_roll_focus_point(replay_rect) {
+        write_debug_log(&format!(
+            "ableton note replay preflight: clicking piano roll grid at ({x},{y})"
+        ));
+        send_ableton_left_click(x, y, Duration::from_millis(60));
+        thread::sleep(Duration::from_millis(300));
+    } else {
+        write_debug_log("ableton note replay preflight: no live rect for piano roll grid click");
+    }
+
+    if ableton_vault_indicates_transport_running(events)
+        && !ableton_transport_started_before_index(events, current_index)
+    {
+        write_debug_log("ableton note replay preflight: starting transport with spacebar");
+        let _ = send_keyboard_input(VIRTUAL_KEY(0x20), KEYBD_EVENT_FLAGS(0));
+        thread::sleep(Duration::from_millis(60));
+        let _ = send_keyboard_input(VIRTUAL_KEY(0x20), KEYEVENTF_KEYUP);
+        thread::sleep(Duration::from_millis(300));
+    }
+}
+
+fn ableton_piano_roll_focus_point(rect: Option<&WindowRect>) -> Option<(i32, i32)> {
+    let rect = rect?;
+    Some((
+        rect.left + ((rect.width as f64) * 0.58).round() as i32,
+        rect.top + ((rect.height as f64) * 0.78).round() as i32,
+    ))
+}
+
+fn ableton_vault_indicates_transport_running(events: &[&RecordedEvent]) -> bool {
+    events.iter().any(|event| {
+        event
+            .element_name
+            .as_deref()
+            .map(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("playing") || lower == "stop"
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn ableton_transport_started_before_index(events: &[&RecordedEvent], current_index: usize) -> bool {
+    events.iter().take(current_index).any(|event| {
+        event
+            .element_name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains("playing"))
+            .unwrap_or(false)
+    })
 }
 
 fn vk_from_recorded_key(value: &str) -> Result<u16, String> {
