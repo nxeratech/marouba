@@ -1,7 +1,14 @@
 #![windows_subsystem = "windows"]
 
+mod ableton;
 mod classifier;
+mod paint;
 mod route_switcher;
+mod vault;
+
+use ableton::*;
+use paint::*;
+use vault::*;
 
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -38,8 +45,9 @@ use windows::Win32::System::Com::{
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    TreeScope_Subtree, UIA_InvokePatternId, UIA_LegacyIAccessibleNamePropertyId,
-    UIA_NamePropertyId,
+    IUIAutomationRangeValuePattern, IUIAutomationValuePattern, TreeScope_Subtree,
+    UIA_InvokePatternId, UIA_LegacyIAccessibleNamePropertyId, UIA_NamePropertyId,
+    UIA_RangeValuePatternId, UIA_ValuePatternId,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -124,6 +132,9 @@ struct RecordedEvent {
     element_role: Option<String>,
     colour_hex: Option<String>,
     semantic: Option<String>,
+    parameter_value_raw: Option<String>,
+    parameter_value_normalized: Option<f64>,
+    parameter_value_capture_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -474,6 +485,9 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     element_role: None,
                     colour_hex: None,
                     semantic: None,
+                    parameter_value_raw: None,
+                    parameter_value_normalized: None,
+                    parameter_value_capture_method: None,
                 },
             );
         } else if current_app_name.is_empty() || current_app_name == "unknown" {
@@ -712,6 +726,9 @@ fn mouse_event_record(
         element_role: None,
         colour_hex: None,
         semantic: None,
+        parameter_value_raw: None,
+        parameter_value_normalized: None,
+        parameter_value_capture_method: None,
     };
     if kind == "mousedown" || (kind == "mouseup" && title_is_ableton(&window.title)) {
         if let Ok((element, _)) = find_uia_element(&UiaRequest {
@@ -734,6 +751,18 @@ fn mouse_event_record(
             );
             event.element_name = body.get("name").and_then(Value::as_str).map(str::to_string);
             event.element_role = body.get("control_type").map(Value::to_string);
+        }
+    }
+    if kind == "mouseup" && is_parameter_event_candidate(&event) {
+        match capture_uia_parameter_value_at_point(x, y) {
+            Some(capture) => {
+                event.parameter_value_raw = capture.raw;
+                event.parameter_value_normalized = capture.normalized;
+                event.parameter_value_capture_method = Some(capture.method);
+            }
+            None => {
+                event.parameter_value_capture_method = Some("unavailable".to_string());
+            }
         }
     }
     if is_ableton_event(&event) {
@@ -892,6 +921,9 @@ fn keyboard_event_record(
         element_role: None,
         colour_hex: None,
         semantic: midi_note.map(|note| format!("midi_note:{note}")),
+        parameter_value_raw: None,
+        parameter_value_normalized: None,
+        parameter_value_capture_method: None,
     }
 }
 
@@ -1034,70 +1066,8 @@ fn token_path() -> PathBuf {
     PathBuf::from(home).join(".marouba").join("companion.token")
 }
 
-fn vault_workflows_dir() -> PathBuf {
-    vault_dir().join("workflows")
-}
-
-fn vault_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("MAROUBA_VAULT_PATH") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    std::env::var("LOCALAPPDATA")
-        .map(|path| PathBuf::from(path).join("Marouba").join("vault"))
-        .unwrap_or_else(|_| PathBuf::from(r"C:\Users\Dave\AppData\Local\Marouba\vault"))
-}
-
 fn marouba_root_dir() -> PathBuf {
     PathBuf::from(r"C:\Share\Marouba")
-}
-
-fn list_saved_workflows() -> (Value, u16) {
-    let dir = vault_workflows_dir();
-    let mut workflows = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (json!([]), 200),
-        Err(error) => {
-            return (
-                json!({"error": format!("failed to read workflow vault: {error}")}),
-                500,
-            )
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
-        if let Some(workflow) = workflow_summary_from_path(path) {
-            workflows.push(workflow);
-        }
-    }
-
-    workflows.sort_by(|left, right| left.name.cmp(&right.name));
-    (json!(workflows), 200)
-}
-
-fn workflow_summary_from_path(path: PathBuf) -> Option<VaultWorkflowSummary> {
-    let metadata = std::fs::metadata(&path).ok()?;
-    let name = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("workflow")
-        .to_string();
-    Some(VaultWorkflowSummary {
-        name,
-        size_kb: (metadata.len() + 1023) / 1024,
-        modified: metadata
-            .modified()
-            .ok()
-            .map(|modified| format_modified_time(&path, modified))
-            .unwrap_or_else(|| "unknown".to_string()),
-    })
 }
 
 fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
@@ -1105,6 +1075,10 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         Ok(name) => name,
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
     };
+
+    if let Some(steps) = parse_v2_workflow_steps(&name).filter(|steps| !steps.is_empty()) {
+        return replay_v2_workflow(&name, steps);
+    }
 
     if let Some(events) = parse_gesture_workflow(&name) {
         let target_windows = replay_target_windows(&name, &events);
@@ -1643,98 +1617,6 @@ fn focus_first_available_window(candidates: &[String]) -> Result<String, String>
     ))
 }
 
-fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
-    let content = workflow_content(name)?;
-    let frontmatter = frontmatter_block(&content)?;
-    let routes_text = yaml_field_block(frontmatter, "routes")?;
-    let routes: Value = serde_json::from_str(&routes_text).ok()?;
-    for route in routes.as_array()? {
-        if route.get("type").and_then(Value::as_str) == Some("gesture") {
-            let events = route.get("events")?.clone();
-            return serde_json::from_value(events).ok();
-        }
-    }
-    None
-}
-
-fn parse_workflow_app_name(name: &str) -> Option<String> {
-    let content = workflow_content(name)?;
-    let frontmatter = frontmatter_block(&content)?;
-    yaml_scalar_field(frontmatter, "app")
-}
-
-fn workflow_content(name: &str) -> Option<String> {
-    let path = vault_workflows_dir().join(format!("{name}.md"));
-    std::fs::read_to_string(path).ok()
-}
-
-fn frontmatter_block(content: &str) -> Option<&str> {
-    let mut parts = content.splitn(3, "---");
-    if !parts.next()?.trim().is_empty() {
-        return None;
-    }
-    parts.next()
-}
-
-fn yaml_field_block(frontmatter: &str, field: &str) -> Option<String> {
-    let prefix = format!("{field}:");
-    let mut collecting = false;
-    let mut lines = Vec::new();
-    for line in frontmatter.lines() {
-        if collecting {
-            if is_top_level_yaml_field(line) {
-                break;
-            }
-            lines.push(line.to_string());
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(&prefix) {
-            collecting = true;
-            let rest = rest.trim();
-            if !rest.is_empty() {
-                lines.push(rest.to_string());
-            }
-        }
-    }
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
-
-fn yaml_scalar_field(frontmatter: &str, field: &str) -> Option<String> {
-    let prefix = format!("{field}:");
-    for line in frontmatter.lines() {
-        let Some(rest) = line.strip_prefix(&prefix) else {
-            continue;
-        };
-        let value = rest.trim();
-        if value.is_empty() {
-            return None;
-        }
-        if let Ok(parsed) = serde_json::from_str::<String>(value) {
-            return Some(parsed);
-        }
-        return Some(value.trim_matches('"').trim_matches('\'').to_string());
-    }
-    None
-}
-
-fn is_top_level_yaml_field(line: &str) -> bool {
-    if line.is_empty() || line.starts_with(char::is_whitespace) {
-        return false;
-    }
-    line.split_once(':')
-        .map(|(key, _)| {
-            !key.is_empty()
-                && key
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(target_os = "windows")]
 fn focus_target_window(window_title: &str) -> Result<(), String> {
     let hwnd = find_window_containing(window_title)
@@ -1821,62 +1703,6 @@ fn command_exists(command: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
-}
-
-fn delete_saved_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
-    let name = match safe_workflow_name(&payload.name) {
-        Ok(name) => name,
-        Err(error) => return (json!({"status": "failed", "error": error}), 400),
-    };
-    let path = vault_workflows_dir().join(format!("{name}.md"));
-    match std::fs::remove_file(&path) {
-        Ok(_) => (json!({"status": "deleted", "name": name}), 200),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            json!({"status": "failed", "error": "workflow not found"}),
-            404,
-        ),
-        Err(error) => (
-            json!({"status": "failed", "error": format!("failed to delete workflow: {error}")}),
-            500,
-        ),
-    }
-}
-
-fn safe_workflow_name(value: &str) -> Result<String, String> {
-    let name = value.trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        Err("workflow name must contain only letters, numbers, hyphen, or underscore".to_string())
-    } else {
-        Ok(name.to_string())
-    }
-}
-
-fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-Command",
-        "(Get-Item -LiteralPath $args[0]).LastWriteTime.ToString('yyyy-MM-dd HH:mm')",
-        &path.display().to_string(),
-    ]);
-    let output = no_window_command(&mut command).output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !value.is_empty() {
-                return value;
-            }
-        }
-    }
-    let seconds = modified
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format!("unix-{seconds}")
 }
 
 fn is_authorized(request: &tiny_http::Request, token: &str) -> bool {
@@ -1968,9 +1794,38 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     | "keyup"
                     | "note_on"
                     | "note_off"
-            )
+            ) || is_ableton_confirmed_midi_note_event(e)
         })
         .collect();
+    let ableton_has_confirmed_note_events = replay_events
+        .iter()
+        .any(|event| is_ableton_confirmed_midi_note_event(event));
+    let ableton_has_instrument_load_events =
+        ableton_vault_has_instrument_load_events(&replay_events);
+    let mut ableton_instrument_loaded = false;
+    let mut ableton_piano_roll_open = false;
+    if ableton_has_confirmed_note_events && !ableton_has_instrument_load_events {
+        ableton_instrument_loaded = true;
+        ableton_piano_roll_open = true;
+        write_debug_log("ableton preflight: no instrument load events found, arming immediately");
+    }
+    if let Some((note_index, note_event)) = replay_events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| is_ableton_confirmed_midi_note_event(event))
+    {
+        write_debug_log(&format!(
+            "ableton confirmed note event candidate: replay_index={} kind={} event_type={:?} key={:?} note={:?} semantic={:?}",
+            note_index,
+            note_event.kind,
+            note_event.event_type,
+            note_event.key,
+            note_event.note,
+            note_event.semantic
+        ));
+    } else {
+        write_debug_log("ableton confirmed note event candidate: none found");
+    }
     let profile_window_title = payload
         .target_window
         .as_deref()
@@ -2016,22 +1871,39 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                 endpoint
             ));
         }
+        if should_mark_ableton_piano_roll_open(event) && !ableton_piano_roll_open {
+            ableton_piano_roll_open = true;
+            write_debug_log(&format!(
+                "ableton replay state: piano_roll_open=true at replay_index={} element_name={:?}",
+                index, event.element_name
+            ));
+        }
+        if should_fire_ableton_note_preflight(
+            event,
+            ableton_instrument_loaded,
+            ableton_piano_roll_open,
+            ableton_has_instrument_load_events,
+        ) && !ableton_note_context_prepared
+        {
+            write_debug_log(&format!(
+                "ableton note replay preflight armed: replay_index={} kind={} event_type={:?} key={:?} note={:?} semantic={:?} instrument_loaded={} piano_roll_open={} vault_has_instrument_load_events={}",
+                index,
+                event.kind,
+                event.event_type,
+                event.key,
+                event.note,
+                event.semantic,
+                ableton_instrument_loaded,
+                ableton_piano_roll_open,
+                ableton_has_instrument_load_events
+            ));
+            prepare_ableton_note_replay_context(&payload);
+            ableton_note_context_prepared = true;
+        }
         if matches!(
             event.kind.as_str(),
             "keydown" | "keyup" | "note_on" | "note_off"
         ) {
-            if is_ableton_event(event)
-                && is_ableton_note_keyboard_event(event)
-                && !ableton_note_context_prepared
-            {
-                prepare_ableton_note_replay_context(
-                    &payload,
-                    &replay_events,
-                    index,
-                    replay_rect.as_ref(),
-                );
-                ableton_note_context_prepared = true;
-            }
             if let Some(target) = payload
                 .target_window
                 .as_deref()
@@ -2137,6 +2009,13 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     index,
                     replay_rect.as_ref(),
                 ) {
+                    if ableton_double_click_loads_instrument(&replay_events, index) {
+                        ableton_instrument_loaded = true;
+                        write_debug_log(&format!(
+                            "ableton replay state: instrument_loaded=true via double-click at replay_index={} element_name={:?}",
+                            index, event.element_name
+                        ));
+                    }
                     replayed += 4;
                     thread::sleep(replay_event_delay(
                         replay_events[up_index],
@@ -2163,6 +2042,11 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     index,
                     replay_rect.as_ref(),
                 ) {
+                    ableton_instrument_loaded = true;
+                    write_debug_log(&format!(
+                        "ableton replay state: instrument_loaded=true via drag at replay_index={} element_name={:?}",
+                        index, event.element_name
+                    ));
                     replayed += up_index - index + 1;
                     thread::sleep(replay_event_delay(
                         replay_events[up_index],
@@ -2336,6 +2220,99 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     )
 }
 
+fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>) -> (Value, u16) {
+    let all_events: Vec<RecordedEvent> = steps
+        .iter()
+        .filter_map(VaultReplayStep::gesture_events)
+        .flatten()
+        .collect();
+    let target_windows = replay_target_windows(name, &all_events);
+    let focused_window = if target_windows.is_empty() {
+        None
+    } else {
+        match ensure_target_window_ready(&target_windows) {
+            Ok(window_title) => Some(window_title),
+            Err(error) => {
+                let tried = target_windows.join(", ");
+                let target_app = target_windows
+                    .first()
+                    .map(|title| app_name_from_title(title))
+                    .unwrap_or_else(|| "the target app".to_string());
+                return (
+                    json!({
+                        "status": "failed",
+                        "error": error.clone(),
+                        "detail": error,
+                        "target_app": target_app,
+                        "target_windows": tried
+                    }),
+                    200,
+                );
+            }
+        }
+    };
+    thread::sleep(Duration::from_millis(500));
+
+    let mut replayed_steps = 0usize;
+    let mut route_log = Vec::new();
+    for step in steps {
+        if step.step_type == "set_parameter" {
+            match replay_set_parameter_step(&step) {
+                Ok(route) => {
+                    replayed_steps += 1;
+                    route_log.push(json!({"step": step.id, "route": route}));
+                    continue;
+                }
+                Err(error) => {
+                    write_debug_log(&format!(
+                        "set_parameter UIA route failed for {}: {}; falling back to gesture",
+                        step.id, error
+                    ));
+                    route_log.push(json!({"step": step.id, "route": "gesture", "fallback_reason": error}));
+                }
+            }
+        } else {
+            route_log.push(json!({"step": step.id, "route": "gesture"}));
+        }
+
+        let Some(events) = step.gesture_events() else {
+            continue;
+        };
+        let (body, status) = replay_mouse(MouseReplayRequest {
+            target_window: focused_window.clone(),
+            workflow_app: parse_workflow_app_name(name),
+            events,
+        });
+        if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
+            return (
+                json!({
+                    "status": "failed",
+                    "error": body
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("step replay failed"),
+                    "detail": body,
+                    "step": step.id,
+                    "intent": step.intent
+                }),
+                status,
+            );
+        }
+        replayed_steps += 1;
+    }
+
+    (
+        json!({
+            "ok": true,
+            "status": "ok",
+            "replayed_steps": replayed_steps,
+            "focused_window": focused_window,
+            "routes": route_log
+        }),
+        200,
+    )
+}
+
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {
     let name = event
         .element_name
@@ -2384,834 +2361,6 @@ fn normalized_distance(start: &RecordedEvent, end: &RecordedEvent) -> Option<f64
     let dx = end.normalized_x? - start.normalized_x?;
     let dy = end.normalized_y? - start.normalized_y?;
     Some((dx * dx + dy * dy).sqrt())
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_double_click_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-) -> Option<usize> {
-    let first_down = events.get(start).copied()?;
-    if first_down.kind != "mousedown" || first_down.button.as_deref().unwrap_or("left") != "left" {
-        return None;
-    }
-    if is_ableton_piano_roll_note_event(first_down) {
-        return None;
-    }
-    let first_up_index = compact_click_mouseup_index(events, start)?;
-    let second_down_index = first_up_index + 1;
-    let second_down = events.get(second_down_index).copied()?;
-    if second_down.kind != "mousedown"
-        || second_down.button.as_deref().unwrap_or("left") != "left"
-        || !is_ableton_event(second_down)
-    {
-        return None;
-    }
-    if is_ableton_piano_roll_note_event(second_down) {
-        return None;
-    }
-    let second_up_index = compact_click_mouseup_index(events, second_down_index)?;
-    let first_up = events[first_up_index];
-    let second_up = events[second_up_index];
-    if second_up.button.as_deref().unwrap_or("left") != "left" {
-        return None;
-    }
-    let gap = second_down
-        .timestamp_ms
-        .checked_sub(first_up.timestamp_ms)
-        .unwrap_or(u128::MAX);
-    if gap > 300 {
-        return None;
-    }
-    if normalized_distance(first_down, second_down)
-        .map(|distance| distance > 0.006)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let (x1, y1) = resolve_ableton_replay_point(first_down, rect);
-    let (x2, y2) = resolve_ableton_replay_point(second_down, rect);
-    write_debug_log(&format!(
-        "ableton double click: first=({x1},{y1}) second=({x2},{y2}) gap_ms={gap}"
-    ));
-    send_ableton_left_click(x1, y1, replay_event_delay(first_down, Some(first_up)));
-    thread::sleep(replay_event_delay(first_up, Some(second_down)));
-    send_ableton_left_click(x2, y2, replay_event_delay(second_down, Some(second_up)));
-    Some(second_up_index)
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_drag_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-) -> Option<usize> {
-    replay_ableton_drag_segment(events, start, rect, Duration::from_millis(30))
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_drag_segment(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-    final_hold: Duration,
-) -> Option<usize> {
-    let down = events.get(start).copied()?;
-    if down.kind != "mousedown" || down.button.as_deref().unwrap_or("left") != "left" {
-        return None;
-    }
-    let up_index = matching_mouseup_index(events, start)?;
-    let up = events[up_index];
-    let endpoint = last_mousemove_before_mouseup(events, start, up_index)?;
-    if normalized_distance(down, endpoint)
-        .map(|distance| distance < 0.015)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let note_grid_segment = is_ableton_piano_roll_note_event(down);
-    let (down_x, down_y) =
-        resolve_ableton_replay_point_with_note_context(down, rect, note_grid_segment);
-    write_debug_log(&format!(
-        "ableton drag segment: down_index={start} up_index={up_index} start=({down_x},{down_y})"
-    ));
-    if is_ableton_knob_or_eq_event(down) {
-        thread::sleep(Duration::from_millis(150));
-    }
-    send_ableton_mousemove(down_x, down_y);
-    thread::sleep(Duration::from_millis(20));
-    send_ableton_leftdown(down_x, down_y);
-
-    let mut previous = down;
-    for event in events[start + 1..up_index].iter().copied() {
-        if event.kind != "mousemove" {
-            continue;
-        }
-        thread::sleep(replay_event_delay(previous, Some(event)));
-        let (x, y) = resolve_ableton_replay_point_with_note_context(event, rect, note_grid_segment);
-        send_ableton_mousemove(x, y);
-        previous = event;
-    }
-
-    thread::sleep(replay_event_delay(previous, Some(up)));
-    let (up_x, up_y) = resolve_ableton_replay_point_with_note_context(up, rect, note_grid_segment);
-    send_ableton_mousemove(up_x, up_y);
-    thread::sleep(final_hold);
-    send_ableton_leftup(up_x, up_y);
-    Some(up_index)
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_instrument_drag_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-) -> Option<usize> {
-    let down = events.get(start).copied()?;
-    let preset_name = ableton_preset_name(down)?;
-    if !is_ableton_instrument_preset_name(&preset_name) {
-        return None;
-    }
-    let up_index = matching_mouseup_index(events, start)?;
-    let endpoint = last_mousemove_before_mouseup(events, start, up_index)?;
-    if normalized_distance(down, endpoint)
-        .map(|distance| distance < 0.015)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    write_debug_log(&format!(
-        "ableton instrument drag preflight: preset={preset_name:?} down_index={start} up_index={up_index}"
-    ));
-
-    let category = ableton_recorded_browser_category(events, start)
-        .or_else(|| ableton_browser_category_for_preset(&preset_name).map(str::to_string));
-    if let Some(category) = category.as_deref() {
-        match click_uia_name_with_timeout(category, down.window_title.as_deref(), 500) {
-            Ok(()) => {
-                write_debug_log(&format!(
-                    "ableton browser category selected before preset lookup: {category}"
-                ));
-                thread::sleep(Duration::from_millis(180));
-            }
-            Err(error) => write_debug_log(&format!(
-                "ableton browser category selection skipped: category={category} error={error}"
-            )),
-        }
-    }
-
-    let _ = send_ableton_insert_midi_track();
-    thread::sleep(Duration::from_millis(500));
-
-    match locate_ableton_preset_with_scroll(&preset_name, down, rect) {
-        Some((source_x, source_y)) => {
-            let (source_x, source_y) = verify_ableton_browser_source_point(
-                &preset_name,
-                down.window_title.as_deref(),
-                source_x,
-                source_y,
-            );
-            write_debug_log(&format!(
-                "ableton instrument located by name: preset={preset_name:?} source=({source_x},{source_y})"
-            ));
-            replay_ableton_drag_from_source(
-                events,
-                start,
-                rect,
-                source_x,
-                source_y,
-                Duration::from_millis(250),
-            )
-        }
-        None => {
-            write_debug_log(&format!(
-                "ableton instrument name lookup failed; falling back to recorded coordinates: preset={preset_name:?}"
-            ));
-            replay_ableton_drag_segment(events, start, rect, Duration::from_millis(250))
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_group_tracks_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-) -> Option<usize> {
-    let down = events.get(start).copied()?;
-    if down.kind != "mousedown"
-        || down.button.as_deref() != Some("right")
-        || down.element_name.as_deref() != Some("Track Title Bar")
-    {
-        return None;
-    }
-    if !recent_ableton_shift_track_selection(events, start) {
-        return None;
-    }
-    if !upcoming_ableton_search_text(events, start, "GLUE") {
-        return None;
-    }
-    let up_index = matching_mouseup_index(events, start)?;
-    write_debug_log(&format!(
-        "ableton group repair: right-click Track Title Bar at index {start}; sending Ctrl+G"
-    ));
-    let _ = send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x47));
-    thread::sleep(Duration::from_millis(500));
-    let (x, y) = resolve_ableton_replay_point(down, rect);
-    write_debug_log(&format!(
-        "ableton group repair: selecting new group track at ({x},{y})"
-    ));
-    send_ableton_left_click(x, y, Duration::from_millis(80));
-    thread::sleep(Duration::from_millis(250));
-    Some(up_index)
-}
-
-fn recent_ableton_shift_track_selection(events: &[&RecordedEvent], start: usize) -> bool {
-    let begin = start.saturating_sub(16);
-    let mut saw_shift = false;
-    let mut saw_track_title_click = false;
-    for event in &events[begin..start] {
-        if event.kind == "keydown" && matches!(event.key.as_deref(), Some("16") | Some("160")) {
-            saw_shift = true;
-        }
-        if event.kind == "mousedown"
-            && event.button.as_deref().unwrap_or("left") == "left"
-            && event
-                .element_name
-                .as_deref()
-                .map(|name| {
-                    name.eq_ignore_ascii_case("Track Title Bar")
-                        || name.to_ascii_lowercase().contains("armed")
-                })
-                .unwrap_or(false)
-        {
-            saw_track_title_click = true;
-        }
-    }
-    saw_shift && saw_track_title_click
-}
-
-fn upcoming_ableton_search_text(events: &[&RecordedEvent], start: usize, expected: &str) -> bool {
-    let end = (start + 80).min(events.len());
-    let mut saw_search = false;
-    let mut typed = String::new();
-    for event in &events[start + 1..end] {
-        if event.kind == "mousedown" && event.element_name.as_deref() == Some("Search") {
-            saw_search = true;
-            continue;
-        }
-        if saw_search && event.kind == "keydown" {
-            if let Some(key) = event
-                .key
-                .as_deref()
-                .and_then(|value| value.parse::<u32>().ok())
-            {
-                if let Some(ch) = char::from_u32(key) {
-                    if ch.is_ascii_alphabetic() {
-                        typed.push(ch.to_ascii_uppercase());
-                        if typed == expected {
-                            return true;
-                        }
-                        if !expected.starts_with(&typed) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn ableton_preset_name(event: &RecordedEvent) -> Option<String> {
-    event
-        .element_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn is_ableton_instrument_preset_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.ends_with(".adv") || lower.ends_with(".adg")
-}
-
-fn ableton_browser_category_for_preset(name: &str) -> Option<&'static str> {
-    if is_ableton_instrument_preset_name(name) {
-        Some("Instruments")
-    } else {
-        None
-    }
-}
-
-fn ableton_recorded_browser_category(events: &[&RecordedEvent], start: usize) -> Option<String> {
-    let begin = start.saturating_sub(120);
-    events[begin..start]
-        .iter()
-        .rev()
-        .filter(|event| event.kind == "mousedown")
-        .filter_map(|event| event.element_name.as_deref().map(str::trim))
-        .find(|name| ableton_browser_category_name(name))
-        .map(str::to_string)
-}
-
-fn ableton_browser_category_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Sounds"
-            | "Drums"
-            | "Instruments"
-            | "Audio Effects"
-            | "MIDI Effects"
-            | "Max for Live"
-            | "Plug-ins"
-            | "Clips"
-            | "Samples"
-            | "Grooves"
-            | "Templates"
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn verify_ableton_browser_source_point(
-    expected_name: &str,
-    _window_title: Option<&str>,
-    source_x: i32,
-    source_y: i32,
-) -> (i32, i32) {
-    let mut point = (source_x, source_y);
-    for attempt in 0..2 {
-        send_ableton_left_click(point.0, point.1, Duration::from_millis(40));
-        thread::sleep(Duration::from_millis(140));
-        match uia_element_names_and_rect_at_point_with_timeout(point.0, point.1, 500) {
-            Ok((names, rect)) => {
-                if names
-                    .iter()
-                    .any(|name| ableton_browser_item_name_matches(expected_name, name))
-                {
-                    write_debug_log(&format!(
-                        "ableton browser selection verified: expected={expected_name:?} names={names:?} point=({}, {})",
-                        point.0, point.1
-                    ));
-                    return point;
-                }
-                write_debug_log(&format!(
-                    "ableton browser selection mismatch attempt={attempt}: expected={expected_name:?} names={names:?} point=({}, {}) rect={}",
-                    point.0,
-                    point.1,
-                    format_window_rect(Some(&rect))
-                ));
-                point = ableton_next_browser_row_point(point.0, &rect);
-            }
-            Err(error) => {
-                write_debug_log(&format!(
-                    "ableton browser selection verification unavailable for {expected_name:?}: {error}; using located point"
-                ));
-                return (source_x, source_y);
-            }
-        }
-    }
-    write_debug_log(&format!(
-        "ableton browser selection not verified after retry: expected={expected_name:?}; using point=({}, {})",
-        point.0, point.1
-    ));
-    point
-}
-
-fn ableton_browser_item_name_matches(expected: &str, actual: &str) -> bool {
-    let expected = expected.trim();
-    let actual = actual.trim();
-    if expected.eq_ignore_ascii_case(actual) {
-        return true;
-    }
-    browser_item_stem(expected).eq_ignore_ascii_case(&browser_item_stem(actual))
-}
-
-fn browser_item_stem(value: &str) -> String {
-    let trimmed = value.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    for suffix in [".adv", ".adg", ".amxd", ".vst3", ".dll"] {
-        if lower.ends_with(suffix) {
-            return trimmed[..trimmed.len() - suffix.len()].to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
-fn ableton_next_browser_row_point(x: i32, rect: &WindowRect) -> (i32, i32) {
-    let row_height = rect.height.abs().max(1);
-    (x, rect.top + (rect.height / 2) + row_height)
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_device_drag_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-    prior_devices: &[String],
-) -> Option<(usize, String)> {
-    let down = events.get(start).copied()?;
-    let device_name = ableton_device_name(down)?;
-    let up_index = matching_mouseup_index(events, start)?;
-    let endpoint = last_mousemove_before_mouseup(events, start, up_index)?;
-    if normalized_distance(down, endpoint)
-        .map(|distance| distance < 0.015)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let category = ableton_recorded_browser_category(events, start)
-        .or_else(|| ableton_browser_category_for_device(&device_name).map(str::to_string));
-    let target_channel = matching_mouseup_index(events, start)
-        .and_then(|up_index| ableton_target_channel_for_device_drag(down, events[up_index]));
-    if let Some(channel) = target_channel.as_deref() {
-        match click_uia_name_with_timeout(channel, down.window_title.as_deref(), 500) {
-            Ok(()) => {
-                write_debug_log(&format!(
-                    "ableton device target channel focused before add: device={device_name:?} channel={channel:?}"
-                ));
-                thread::sleep(Duration::from_millis(180));
-            }
-            Err(error) => write_debug_log(&format!(
-                "ableton device target channel focus skipped: device={device_name:?} channel={channel:?} error={error}"
-            )),
-        }
-    }
-    if let Some(category) = category.as_deref() {
-        match click_uia_name_with_timeout(category, down.window_title.as_deref(), 500) {
-            Ok(()) => {
-                write_debug_log(&format!(
-                    "ableton device category selected before lookup: {category}"
-                ));
-                thread::sleep(Duration::from_millis(180));
-            }
-            Err(error) => write_debug_log(&format!(
-                "ableton device category selection skipped: category={category} error={error}"
-            )),
-        }
-    }
-    match locate_ableton_preset_with_scroll(&device_name, down, rect) {
-        Some((source_x, source_y)) => {
-            let (source_x, source_y) = verify_ableton_browser_source_point(
-                &device_name,
-                down.window_title.as_deref(),
-                source_x,
-                source_y,
-            );
-            write_debug_log(&format!(
-                "ableton device located by name: device={device_name:?} source=({source_x},{source_y})"
-            ));
-            let up = replay_ableton_drag_from_source(
-                events,
-                start,
-                rect,
-                source_x,
-                source_y,
-                Duration::from_millis(450),
-            )?;
-            thread::sleep(Duration::from_millis(700));
-            verify_ableton_devices_present(prior_devices, down.window_title.as_deref());
-            verify_ableton_devices_present(
-                std::slice::from_ref(&device_name),
-                down.window_title.as_deref(),
-            );
-            Some((up, device_name))
-        }
-        None => {
-            write_debug_log(&format!(
-                "ableton device name lookup failed; falling back to recorded coordinates: device={device_name:?}"
-            ));
-            let up = replay_ableton_drag_segment(events, start, rect, Duration::from_millis(450))?;
-            thread::sleep(Duration::from_millis(700));
-            verify_ableton_devices_present(prior_devices, down.window_title.as_deref());
-            Some((up, device_name))
-        }
-    }
-}
-
-fn ableton_device_name(event: &RecordedEvent) -> Option<String> {
-    if let Some(name) = semantic_tag_value(event, "device:") {
-        Some(name.to_string())
-    } else {
-        let name = event.element_name.as_deref()?.trim();
-        if ableton_is_device_name(name) {
-            Some(name.to_string())
-        } else {
-            None
-        }
-    }
-}
-
-fn ableton_target_channel_for_device_drag(
-    down: &RecordedEvent,
-    up: &RecordedEvent,
-) -> Option<String> {
-    semantic_tag_value(up, "channel:")
-        .or_else(|| semantic_tag_value(down, "channel:"))
-        .map(str::to_string)
-        .or_else(|| {
-            up.element_name
-                .as_deref()
-                .and_then(ableton_channel_from_element_name)
-        })
-        .or_else(|| {
-            down.element_name
-                .as_deref()
-                .and_then(ableton_channel_from_element_name)
-        })
-}
-
-fn ableton_is_device_name(name: &str) -> bool {
-    matches!(
-        name,
-        "EQ Eight"
-            | "Glue Compressor"
-            | "Limiter"
-            | "Compressor"
-            | "Reverb"
-            | "Delay"
-            | "Echo"
-            | "Saturator"
-            | "Auto Filter"
-            | "Utility"
-    )
-}
-
-fn ableton_browser_category_for_device(name: &str) -> Option<&'static str> {
-    if ableton_is_device_name(name) {
-        Some("Audio Effects")
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn verify_ableton_devices_present(devices: &[String], window_title: Option<&str>) {
-    for device in devices {
-        match uia_clickable_point_by_name_with_timeout(device, window_title, 500) {
-            Ok(_) => write_debug_log(&format!(
-                "ableton device verification present: device={device:?}"
-            )),
-            Err(error) => write_debug_log(&format!(
-                "ableton device verification missing after add: device={device:?} error={error}"
-            )),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn locate_ableton_preset_with_scroll(
-    preset_name: &str,
-    recorded_event: &RecordedEvent,
-    rect: Option<&WindowRect>,
-) -> Option<(i32, i32)> {
-    let window_title = recorded_event.window_title.as_deref();
-    for attempt in 0..=8 {
-        match uia_clickable_point_by_name_with_timeout(preset_name, window_title, 650) {
-            Ok(point) => return Some(point),
-            Err(error) => write_debug_log(&format!(
-                "ableton preset UIA lookup attempt {attempt} failed: preset={preset_name:?} error={error}"
-            )),
-        }
-        match ocr_ableton_browser_item_point_with_timeout(preset_name, rect, 1800) {
-            Ok(point) => {
-                write_debug_log(&format!(
-                    "ableton preset located by OCR attempt {attempt}: preset={preset_name:?} source=({},{})",
-                    point.0, point.1
-                ));
-                return Some(point);
-            }
-            Err(error) => write_debug_log(&format!(
-                "ableton preset OCR lookup attempt {attempt} failed: preset={preset_name:?} error={error}"
-            )),
-        }
-        if attempt < 8 {
-            scroll_ableton_browser_near_recorded_source(recorded_event, rect, attempt);
-            thread::sleep(Duration::from_millis(140));
-        }
-    }
-    write_debug_log(&format!(
-        "ableton preset UIA/OCR lookup failed; using coordinate fallback: preset={preset_name:?}"
-    ));
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn scroll_ableton_browser_near_recorded_source(
-    recorded_event: &RecordedEvent,
-    rect: Option<&WindowRect>,
-    attempt: usize,
-) {
-    let (x, y) = resolve_ableton_replay_point(recorded_event, rect);
-    unsafe {
-        let _ = SetCursorPos(x, y);
-        let wheel_delta = if attempt < 4 { -360i32 } else { 360i32 };
-        mouse_event(MOUSEEVENTF_WHEEL, 0, 0, wheel_delta, 0);
-    }
-    write_debug_log(&format!(
-        "ableton browser scroll attempt {attempt}: anchor=({x},{y})"
-    ));
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_drag_from_source(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-    source_x: i32,
-    source_y: i32,
-    final_hold: Duration,
-) -> Option<usize> {
-    let up_index = matching_mouseup_index(events, start)?;
-    let up = events[up_index];
-    let endpoint = last_mousemove_before_mouseup(events, start, up_index).unwrap_or(up);
-    let (end_x, end_y) = resolve_ableton_replay_point(endpoint, rect);
-    let (up_x, up_y) = resolve_ableton_replay_point(up, rect);
-
-    send_ableton_mousemove(source_x, source_y);
-    thread::sleep(Duration::from_millis(40));
-    send_ableton_leftdown(source_x, source_y);
-    thread::sleep(Duration::from_millis(120));
-    for step in 1..=10 {
-        let t = step as f64 / 10.0;
-        let x = source_x as f64 + ((end_x - source_x) as f64 * t);
-        let y = source_y as f64 + ((end_y - source_y) as f64 * t);
-        send_ableton_mousemove(x.round() as i32, y.round() as i32);
-        thread::sleep(Duration::from_millis(35));
-    }
-    send_ableton_mousemove(up_x, up_y);
-    thread::sleep(final_hold);
-    send_ableton_leftup(up_x, up_y);
-    Some(up_index)
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ableton_search_segment_if_present(
-    events: &[&RecordedEvent],
-    start: usize,
-    rect: Option<&WindowRect>,
-) -> Option<usize> {
-    let Some(down) = events.get(start).copied() else {
-        return None;
-    };
-    if down.kind != "mousedown"
-        || down.button.as_deref().unwrap_or("left") != "left"
-        || down.element_name.as_deref() != Some("Search")
-    {
-        return None;
-    }
-    let up_index = matching_mouseup_index(events, start)?;
-    let up = events[up_index];
-    if up.kind != "mouseup" || up.button.as_deref().unwrap_or("left") != "left" {
-        return None;
-    }
-    let (down_x, down_y) = resolve_ableton_replay_point(down, rect);
-    let (up_x, up_y) = resolve_ableton_replay_point(up, rect);
-    write_debug_log(&format!(
-        "ableton search normalize: down_index={start} up_index={up_index} down=({down_x},{down_y}) up=({up_x},{up_y})"
-    ));
-    send_ableton_mousemove(down_x, down_y);
-    thread::sleep(Duration::from_millis(8));
-    send_ableton_leftdown(down_x, down_y);
-    let mut previous = down;
-    for event in events[start + 1..up_index].iter().copied() {
-        if event.kind != "mousemove" {
-            continue;
-        }
-        thread::sleep(replay_event_delay(previous, Some(event)));
-        let (x, y) = resolve_ableton_replay_point(event, rect);
-        send_ableton_mousemove(x, y);
-        previous = event;
-    }
-    thread::sleep(replay_event_delay(previous, Some(up)));
-    send_ableton_mousemove(up_x, up_y);
-    send_ableton_leftup(up_x, up_y);
-    thread::sleep(Duration::from_millis(80));
-    let _ = send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x41));
-    thread::sleep(Duration::from_millis(40));
-    let _ = send_key(VK_BACK);
-    Some(up_index)
-}
-
-fn compact_click_mouseup_index(events: &[&RecordedEvent], start: usize) -> Option<usize> {
-    let mut moves = 0usize;
-    for index in start + 1..events.len() {
-        let event = events[index];
-        if event.kind == "mousedown" {
-            return None;
-        }
-        if event.kind == "mousemove" {
-            moves += 1;
-            if moves > 1 {
-                return None;
-            }
-            continue;
-        }
-        if event.kind == "mouseup" {
-            return Some(index);
-        }
-        return None;
-    }
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn replay_keyboard_event(event: &RecordedEvent) -> Result<(), String> {
-    let key = event
-        .key
-        .as_deref()
-        .ok_or_else(|| "keyboard event missing key".to_string())
-        .and_then(vk_from_recorded_key)?;
-    let flags = if matches!(event.kind.as_str(), "keyup" | "note_off") {
-        KEYEVENTF_KEYUP
-    } else {
-        KEYBD_EVENT_FLAGS(0)
-    };
-    send_keyboard_input(VIRTUAL_KEY(key), flags)
-}
-
-fn is_ableton_note_keyboard_event(event: &RecordedEvent) -> bool {
-    if !is_ableton_event(event) {
-        return false;
-    }
-    if matches!(event.kind.as_str(), "note_on" | "note_off")
-        || matches!(
-            event.event_type.as_deref(),
-            Some("note_on") | Some("note_off")
-        )
-    {
-        return true;
-    }
-    event
-        .semantic
-        .as_deref()
-        .map(|value| {
-            value
-                .split(';')
-                .any(|part| part.trim().starts_with("midi_note:"))
-        })
-        .unwrap_or(false)
-        || (event.kind == "keydown"
-            && event
-                .key
-                .as_deref()
-                .and_then(|key| vk_from_recorded_key(key).ok())
-                .and_then(|vk| ableton_computer_midi_note_for_vk(vk as i32))
-                .is_some())
-}
-
-fn prepare_ableton_note_replay_context(
-    payload: &MouseReplayRequest,
-    events: &[&RecordedEvent],
-    current_index: usize,
-    replay_rect: Option<&WindowRect>,
-) {
-    if let Some(target) = payload.target_window.as_deref().or_else(|| {
-        payload
-            .events
-            .iter()
-            .find_map(|event| event.window_title.as_deref())
-    }) {
-        let _ = focus_target_window(target);
-    }
-    thread::sleep(Duration::from_millis(120));
-    write_debug_log("=== ABLETON NOTE PREFLIGHT ===");
-
-    if let Some((x, y)) = ableton_piano_roll_focus_point(replay_rect) {
-        write_debug_log(&format!(
-            "ableton note replay preflight: rect={} formula=x:left+width*0.65 y:top+height*0.65 resolved=({x},{y})",
-            format_window_rect(replay_rect)
-        ));
-        send_ableton_left_click(x, y, Duration::from_millis(60));
-        thread::sleep(Duration::from_millis(400));
-    } else {
-        write_debug_log("ableton note replay preflight: no grid point available");
-    }
-
-    if ableton_vault_indicates_transport_running(events)
-        && !ableton_transport_started_before_index(events, current_index)
-    {
-        write_debug_log("ableton note replay preflight: starting transport with spacebar");
-        let _ = send_keyboard_input(VIRTUAL_KEY(0x20), KEYBD_EVENT_FLAGS(0));
-        thread::sleep(Duration::from_millis(60));
-        let _ = send_keyboard_input(VIRTUAL_KEY(0x20), KEYEVENTF_KEYUP);
-        thread::sleep(Duration::from_millis(300));
-    }
-}
-
-fn ableton_piano_roll_focus_point(rect: Option<&WindowRect>) -> Option<(i32, i32)> {
-    let rect = rect?;
-    Some((
-        rect.left + ((rect.width as f64) * 0.65).round() as i32,
-        rect.top + ((rect.height as f64) * 0.65).round() as i32,
-    ))
-}
-
-fn ableton_vault_indicates_transport_running(events: &[&RecordedEvent]) -> bool {
-    events.iter().any(|event| {
-        event
-            .element_name
-            .as_deref()
-            .map(|name| {
-                let lower = name.to_ascii_lowercase();
-                lower.contains("playing") || lower == "stop"
-            })
-            .unwrap_or(false)
-    })
-}
-
-fn ableton_transport_started_before_index(events: &[&RecordedEvent], current_index: usize) -> bool {
-    events.iter().take(current_index).any(|event| {
-        event
-            .element_name
-            .as_deref()
-            .map(|name| name.to_ascii_lowercase().contains("playing"))
-            .unwrap_or(false)
-    })
 }
 
 fn vk_from_recorded_key(value: &str) -> Result<u16, String> {
@@ -3280,6 +2429,103 @@ fn try_uia_named_mousedown(event: &RecordedEvent) -> bool {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn replay_set_parameter_step(step: &VaultReplayStep) -> Result<&'static str, String> {
+    let target = step
+        .value
+        .get("target")
+        .ok_or_else(|| "set_parameter step missing target".to_string())?;
+    let element_name = target
+        .get("element_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "set_parameter step missing target.element_name".to_string())?;
+    let window_title = target
+        .get("window_title")
+        .and_then(Value::as_str)
+        .or_else(|| target.get("app").and_then(Value::as_str));
+    let value = step
+        .value
+        .get("value")
+        .ok_or_else(|| "set_parameter step missing value".to_string())?;
+    let normalized = value.get("normalized").and_then(Value::as_f64);
+    let raw = value.get("raw").and_then(Value::as_str);
+    set_uia_parameter_value(element_name, window_title, raw, normalized)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replay_set_parameter_step(_: &VaultReplayStep) -> Result<&'static str, String> {
+    Err("UIA parameter replay not implemented on this platform".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn set_uia_parameter_value(
+    element_name: &str,
+    window_title: Option<&str>,
+    raw: Option<&str>,
+    normalized: Option<f64>,
+) -> Result<&'static str, String> {
+    let element_name = element_name.to_string();
+    let window_title = window_title.map(str::to_string);
+    let raw = raw.map(str::to_string);
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = set_uia_parameter_value_inner(
+            &element_name,
+            window_title.as_deref(),
+            raw.as_deref(),
+            normalized,
+        );
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(Duration::from_millis(500))
+        .map_err(|_| "UIA parameter set timed out".to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn set_uia_parameter_value_inner(
+    element_name: &str,
+    window_title: Option<&str>,
+    raw: Option<&str>,
+    normalized: Option<f64>,
+) -> Result<&'static str, String> {
+    let (element, _) = find_uia_element(&UiaRequest {
+        name: Some(element_name.to_string()),
+        role: None,
+        window_title: window_title.map(str::to_string),
+        x: None,
+        y: None,
+    })?;
+    unsafe {
+        if let Some(normalized) = normalized {
+            if let Ok(pattern) = element
+                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+            {
+                let min = pattern.CurrentMinimum().unwrap_or(0.0);
+                let max = pattern.CurrentMaximum().unwrap_or(1.0);
+                let value = min + normalized.clamp(0.0, 1.0) * (max - min);
+                pattern
+                    .SetValue(value)
+                    .map_err(|error| format!("failed to set range value: {error}"))?;
+                return Ok("uia_range");
+            }
+        }
+        if let Some(raw) = raw {
+            if let Ok(pattern) =
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            {
+                pattern
+                    .SetValue(&BSTR::from(raw))
+                    .map_err(|error| format!("failed to set value: {error}"))?;
+                return Ok("uia_value");
+            }
+        }
+    }
+    Err("UIA element has no writable value or range pattern".to_string())
+}
+
 #[cfg(not(target_os = "windows"))]
 fn try_uia_named_mousedown(_: &RecordedEvent) -> bool {
     false
@@ -3295,7 +2541,114 @@ fn is_ableton_event(event: &RecordedEvent) -> bool {
             .app_name
             .as_deref()
             .map(title_is_ableton)
+        .unwrap_or(false)
+}
+
+#[derive(Clone, Debug)]
+struct ParameterValueCapture {
+    raw: Option<String>,
+    normalized: Option<f64>,
+    method: String,
+}
+
+fn is_parameter_event_candidate(event: &RecordedEvent) -> bool {
+    event
+        .element_role
+        .as_deref()
+        .map(|role| role.contains("50015"))
+        .unwrap_or(false)
+        || event
+            .element_name
+            .as_deref()
+            .map(parameter_name_looks_adjustable)
             .unwrap_or(false)
+}
+
+fn parameter_name_looks_adjustable(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "knob",
+        "slider",
+        "fader",
+        "volume",
+        "gain",
+        "send",
+        "pan",
+        "frequency",
+        "freq",
+        "resonance",
+        "cutoff",
+        "threshold",
+        "attack",
+        "decay",
+        "sustain",
+        "release",
+        "reverb",
+        "delay",
+        "dry/wet",
+        "wet",
+        "amount",
+        "level",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+#[cfg(target_os = "windows")]
+fn capture_uia_parameter_value_at_point(x: i32, y: i32) -> Option<ParameterValueCapture> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = capture_uia_parameter_value_at_point_inner(x, y);
+        let _ = sender.send(result);
+    });
+    receiver.recv_timeout(Duration::from_millis(500)).ok().flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn capture_uia_parameter_value_at_point_inner(x: i32, y: i32) -> Option<ParameterValueCapture> {
+    let (element, _) = find_uia_element(&UiaRequest {
+        name: None,
+        role: None,
+        window_title: None,
+        x: Some(x),
+        y: Some(y),
+    })
+    .ok()?;
+    unsafe {
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        {
+            let value = pattern.CurrentValue().ok()?.to_string();
+            return Some(ParameterValueCapture {
+                raw: Some(value),
+                normalized: None,
+                method: "uia_value".to_string(),
+            });
+        }
+        if let Ok(pattern) =
+            element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+        {
+            let value = pattern.CurrentValue().ok()?;
+            let min = pattern.CurrentMinimum().unwrap_or(0.0);
+            let max = pattern.CurrentMaximum().unwrap_or(1.0);
+            let normalized = if (max - min).abs() > f64::EPSILON {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            } else {
+                value
+            };
+            return Some(ParameterValueCapture {
+                raw: Some(value.to_string()),
+                normalized: Some(normalized),
+                method: "uia_range".to_string(),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capture_uia_parameter_value_at_point(_: i32, _: i32) -> Option<ParameterValueCapture> {
+    None
 }
 
 fn title_is_ableton(value: &str) -> bool {
@@ -4757,48 +4110,6 @@ fn is_ableton_automation_record_event(event: &RecordedEvent) -> bool {
             .unwrap_or(false)
 }
 
-fn is_colour_select_event(event: &RecordedEvent) -> bool {
-    event.kind == "mousedown"
-        && event.semantic.as_deref() == Some("colour_select")
-        && event.colour_hex.is_some()
-        && is_ms_paint_event(event)
-}
-
-fn is_ms_paint_event(event: &RecordedEvent) -> bool {
-    event
-        .app_name
-        .as_deref()
-        .map(title_is_ms_paint)
-        .unwrap_or(false)
-        || event
-            .window_title
-            .as_deref()
-            .map(title_is_ms_paint)
-            .unwrap_or(false)
-}
-
-fn title_is_ms_paint(value: &str) -> bool {
-    value.to_ascii_lowercase().contains("paint")
-}
-
-fn replay_payload_targets_ms_paint(payload: &MouseReplayRequest) -> bool {
-    payload
-        .target_window
-        .as_deref()
-        .map(title_is_ms_paint)
-        .unwrap_or(false)
-        || payload
-            .workflow_app
-            .as_deref()
-            .map(title_is_ms_paint)
-            .unwrap_or(false)
-        || first_valid_event_window_title(&payload.events)
-            .as_deref()
-            .map(title_is_ms_paint)
-            .unwrap_or(false)
-        || payload.events.iter().any(is_ms_paint_event)
-}
-
 fn normalized_event_outside_window(event: &RecordedEvent) -> bool {
     event
         .normalized_x
@@ -4808,30 +4119,6 @@ fn normalized_event_outside_window(event: &RecordedEvent) -> bool {
             .normalized_y
             .map(|value| !(0.0..=1.0).contains(&value))
             .unwrap_or(false)
-}
-
-#[cfg(target_os = "windows")]
-fn resolve_target_replay_rect(payload: &MouseReplayRequest) -> Result<WindowRect, String> {
-    if replay_payload_targets_ms_paint(payload) {
-        return prepare_ms_paint_replay_tool(payload);
-    }
-    let title = payload
-        .target_window
-        .clone()
-        .or_else(|| first_valid_event_window_title(&payload.events))
-        .ok_or_else(|| "gesture replay needs a target window title".to_string())?;
-    let hwnd = find_window_containing(&title)
-        .ok_or_else(|| format!("no visible top-level window contains '{title}'"))?;
-    window_rect_for_hwnd(hwnd).ok_or_else(|| format!("failed to get window rect for '{title}'"))
-}
-
-fn first_valid_event_window_title(events: &[RecordedEvent]) -> Option<String> {
-    events
-        .iter()
-        .find(|event| !is_empty_unknown_system_event(event))
-        .and_then(|event| event.window_title.as_ref())
-        .map(|title| title.trim().to_string())
-        .filter(|title| !title.is_empty())
 }
 
 fn write_debug_log(msg: &str) {
@@ -4848,210 +4135,6 @@ fn write_debug_log(msg: &str) {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }
-}
-
-#[cfg(target_os = "windows")]
-fn sample_screen_colour_hex(x: i32, y: i32) -> Option<String> {
-    unsafe {
-        let screen_hwnd = HWND(std::ptr::null_mut());
-        let screen_dc = GetDC(screen_hwnd);
-        if screen_dc.0.is_null() {
-            eprintln!("[Marouba] GetDC(null HWND) returned null while sampling colour");
-            return None;
-        }
-
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        if mem_dc.0.is_null() {
-            let _ = ReleaseDC(screen_hwnd, screen_dc);
-            eprintln!("[Marouba] CreateCompatibleDC failed while sampling colour");
-            return None;
-        }
-
-        let bitmap = CreateCompatibleBitmap(screen_dc, 1, 1);
-        if bitmap.0.is_null() {
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(screen_hwnd, screen_dc);
-            eprintln!("[Marouba] CreateCompatibleBitmap failed while sampling colour");
-            return None;
-        }
-
-        let old_object = SelectObject(mem_dc, bitmap);
-        if old_object.0.is_null() {
-            let _ = DeleteObject(bitmap);
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(screen_hwnd, screen_dc);
-            eprintln!("[Marouba] SelectObject failed while sampling colour");
-            return None;
-        }
-
-        if BitBlt(mem_dc, 0, 0, 1, 1, screen_dc, x, y, SRCCOPY).is_err() {
-            let _ = SelectObject(mem_dc, old_object);
-            let _ = DeleteObject(bitmap);
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(screen_hwnd, screen_dc);
-            eprintln!("[Marouba] BitBlt failed while sampling colour at ({x}, {y})");
-            return None;
-        }
-
-        let colour = GetPixel(mem_dc, 0, 0);
-        eprintln!(
-            "[Marouba] Raw COLORREF sampled at ({x}, {y}): 0x{:08X}",
-            colour.0
-        );
-        let _ = SelectObject(mem_dc, old_object);
-        let _ = DeleteObject(bitmap);
-        let _ = DeleteDC(mem_dc);
-        let _ = ReleaseDC(screen_hwnd, screen_dc);
-        if colour.0 == 0xFFFF_FFFF {
-            eprintln!("[Marouba] GetPixel returned CLR_INVALID at ({x}, {y})");
-            return None;
-        }
-        let value = colour.0;
-        let red = value & 0xFF;
-        let green = (value >> 8) & 0xFF;
-        let blue = (value >> 16) & 0xFF;
-        Some(format!("#{red:02X}{green:02X}{blue:02X}"))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn sample_screen_colour_hex(_: i32, _: i32) -> Option<String> {
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn prepare_ms_paint_replay_tool(payload: &MouseReplayRequest) -> Result<WindowRect, String> {
-    let (hwnd, rect) = find_paint_window(payload)
-        .ok_or_else(|| "Could not find MS Paint window for replay prelude".to_string())?;
-    write_debug_log(&format!(
-        "Paint HWND found, rect: {} {} {} {}",
-        rect.left, rect.top, rect.width, rect.height
-    ));
-    unsafe {
-        if !SetForegroundWindow(hwnd).as_bool() {
-            return Err("SetForegroundWindow returned false for Paint prelude".to_string());
-        }
-    }
-    write_debug_log("SetForegroundWindow sent");
-    // Tool prelude removed — was causing selection state. Re-add when UIA toolbar click is implemented.
-    thread::sleep(Duration::from_millis(500));
-    Ok(rect)
-}
-
-#[cfg(target_os = "windows")]
-fn find_paint_window(payload: &MouseReplayRequest) -> Option<(HWND, WindowRect)> {
-    let mut candidates = Vec::new();
-    if let Some(target) = payload
-        .target_window
-        .as_deref()
-        .filter(|value| title_is_ms_paint(value))
-    {
-        candidates.push(target.to_string());
-    }
-    if let Some(app) = payload
-        .workflow_app
-        .as_deref()
-        .filter(|value| title_is_ms_paint(value))
-    {
-        candidates.push(app.to_string());
-    }
-    if let Some(title) =
-        first_valid_event_window_title(&payload.events).filter(|value| title_is_ms_paint(value))
-    {
-        candidates.push(title);
-    }
-    for event in &payload.events {
-        if let Some(title) = event
-            .window_title
-            .as_deref()
-            .filter(|value| title_is_ms_paint(value))
-        {
-            if !candidates
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(title))
-            {
-                candidates.push(title.to_string());
-            }
-        }
-    }
-    if candidates.is_empty() {
-        candidates.push("paint".to_string());
-    }
-    for candidate in candidates {
-        if let Some(hwnd) = find_window_containing(&candidate) {
-            if let Some(rect) = window_rect_for_hwnd(hwnd) {
-                return Some((hwnd, rect));
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn window_rect_for_hwnd(hwnd: HWND) -> Option<WindowRect> {
-    unsafe {
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_ok() {
-            Some(WindowRect {
-                left: rect.left,
-                top: rect.top,
-                width: rect.right - rect.left,
-                height: rect.bottom - rect.top,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn replay_ms_paint_colour_select(colour_hex: &str) -> Result<(), String> {
-    let (red, green, blue) = parse_colour_hex(colour_hex)?;
-    send_modified_key(VK_MENU, VIRTUAL_KEY(0x45))?;
-    thread::sleep(Duration::from_millis(80));
-    send_key(VIRTUAL_KEY(0x43))?;
-    thread::sleep(Duration::from_millis(400));
-    replace_current_field(red)?;
-    send_key(VK_TAB)?;
-    replace_current_field(green)?;
-    send_key(VK_TAB)?;
-    replace_current_field(blue)?;
-    send_key(VK_RETURN)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn replay_ms_paint_colour_select(_: &str) -> Result<(), String> {
-    Err("semantic colour replay is not implemented on this platform".to_string())
-}
-
-fn parse_colour_hex(value: &str) -> Result<(u8, u8, u8), String> {
-    let hex = value.trim().trim_start_matches('#');
-    if hex.len() != 6 {
-        return Err(format!("invalid colour hex '{value}'"));
-    }
-    let red = u8::from_str_radix(&hex[0..2], 16)
-        .map_err(|_| format!("invalid red value in '{value}'"))?;
-    let green = u8::from_str_radix(&hex[2..4], 16)
-        .map_err(|_| format!("invalid green value in '{value}'"))?;
-    let blue = u8::from_str_radix(&hex[4..6], 16)
-        .map_err(|_| format!("invalid blue value in '{value}'"))?;
-    Ok((red, green, blue))
-}
-
-#[cfg(target_os = "windows")]
-fn replace_current_field(value: u8) -> Result<(), String> {
-    send_modified_key(VK_CONTROL, VIRTUAL_KEY(0x41))?;
-    send_key(VK_BACK)?;
-    type_ascii(&value.to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn type_ascii(value: &str) -> Result<(), String> {
-    for byte in value.bytes() {
-        send_key(VIRTUAL_KEY(byte as u16))?;
-        thread::sleep(Duration::from_millis(20));
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -5659,6 +4742,8 @@ fn write_workflow(
     let today = current_date_string();
     let app = workflow_app_from_events(events);
     let events_json = serde_json::to_string_pretty(events).map_err(|error| error.to_string())?;
+    let steps = compile_v2_steps(events);
+    let steps_markdown = workflow_steps_markdown(&steps)?;
     let routes_json = format!(
         "[\n  {{\n    \"type\": \"gesture\",\n    \"events\": {},\n    \"target_window\": {}\n  }}\n]",
         indent_json_value(&events_json, 4),
@@ -5667,6 +4752,7 @@ fn write_workflow(
 
     let body = format!(
         "---\n\
+vault_spec_version: 2\n\
 id: {}\n\
 name: {}\n\
 app: {}\n\
@@ -5676,6 +4762,8 @@ tags: {}\n\
 author: nxeratech\n\
 created: {}\n\
 last_verified: {}\n\
+compat:\n\
+  legacy_gesture_routes: true\n\
 source: self_taught\n\
 routes: {}\n\
 fallback_order: [gesture, ask]\n\
@@ -5683,7 +4771,7 @@ verification: {{\"type\":\"none\"}}\n\
 calls: []\n\
 depends_on: []\n\
 ---\n\n\
-# {}\n\n{}\n\nCaptured raw event stream is stored in the gesture route.\n",
+# {}\n\n{}\n\n## Steps\n\n{}\n\nCaptured raw event stream is stored in step routes and in the compatibility gesture route.\n",
         yaml_scalar(&id),
         yaml_scalar(name),
         yaml_scalar(&app),
@@ -5694,12 +4782,141 @@ depends_on: []\n\
         routes_json.replace('\n', "\n  "),
         name,
         metadata.description,
+        steps_markdown,
     );
     let dir = vault_workflows_dir();
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join(format!("{id}.md"));
     std::fs::write(&path, body).map_err(|error| error.to_string())?;
     Ok(path)
+}
+
+fn compile_v2_steps(events: &[RecordedEvent]) -> Vec<Value> {
+    let mut steps = Vec::new();
+    let mut gesture_buffer = Vec::<RecordedEvent>::new();
+    let mut index = 0usize;
+
+    while index < events.len() {
+        if events[index].kind == "mousedown" && is_parameter_event_candidate(&events[index]) {
+            if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                let segment = events[index..=up_index].to_vec();
+                let moved = segment.iter().any(|event| event.kind == "mousemove");
+                if moved {
+                    flush_gesture_step(&mut steps, &mut gesture_buffer);
+                    steps.push(parameter_step_value(steps.len() + 1, &segment));
+                    index = up_index + 1;
+                    continue;
+                }
+            }
+        }
+        gesture_buffer.push(events[index].clone());
+        index += 1;
+    }
+    flush_gesture_step(&mut steps, &mut gesture_buffer);
+    steps
+}
+
+fn matching_mouseup_index_for_recorded(events: &[RecordedEvent], start: usize) -> Option<usize> {
+    let button = events[start].button.as_deref().unwrap_or("left");
+    events
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, event)| {
+            (event.kind == "mouseup" && event.button.as_deref().unwrap_or("left") == button)
+                .then_some(index)
+        })
+}
+
+fn flush_gesture_step(steps: &mut Vec<Value>, gesture_buffer: &mut Vec<RecordedEvent>) {
+    if gesture_buffer.is_empty() {
+        return;
+    }
+    let step_number = steps.len() + 1;
+    let events = std::mem::take(gesture_buffer);
+    steps.push(json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "legacy_gesture_sequence",
+        "intent": "Replay recorded gesture sequence.",
+        "routes": [
+            {
+                "type": "gesture",
+                "events": events
+            }
+        ]
+    }));
+}
+
+fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value {
+    let down = segment.first();
+    let up = segment.last();
+    let element_name = down
+        .and_then(|event| event.element_name.clone())
+        .or_else(|| up.and_then(|event| event.element_name.clone()))
+        .unwrap_or_else(|| "parameter".to_string());
+    let element_role = down
+        .and_then(|event| event.element_role.clone())
+        .or_else(|| up.and_then(|event| event.element_role.clone()))
+        .unwrap_or_default();
+    let app = down
+        .and_then(|event| event.app_name.clone())
+        .or_else(|| up.and_then(|event| event.app_name.clone()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let window_title = down
+        .and_then(|event| event.window_title.clone())
+        .or_else(|| up.and_then(|event| event.window_title.clone()))
+        .unwrap_or_default();
+    let raw = up.and_then(|event| event.parameter_value_raw.clone());
+    let normalized = up.and_then(|event| event.parameter_value_normalized);
+    let capture_method = up
+        .and_then(|event| event.parameter_value_capture_method.clone())
+        .unwrap_or_else(|| "unavailable".to_string());
+
+    json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "set_parameter",
+        "intent": format!("Adjust {element_name} parameter."),
+        "target": {
+            "element_name": element_name.clone(),
+            "element_role": element_role,
+            "app": app,
+            "window_title": window_title
+        },
+        "value": {
+            "raw": raw,
+            "normalized": normalized,
+            "capture_method": capture_method
+        },
+        "routes": [
+            {
+                "type": "uia",
+                "element_name": element_name,
+                "action": "set_value",
+                "value": normalized
+            },
+            {
+                "type": "gesture",
+                "events": segment
+            }
+        ]
+    })
+}
+
+fn workflow_steps_markdown(steps: &[Value]) -> Result<String, String> {
+    let mut output = String::new();
+    for (index, step) in steps.iter().enumerate() {
+        let intent = step
+            .get("intent")
+            .and_then(Value::as_str)
+            .unwrap_or("Replay recorded step.");
+        output.push_str(&format!("### Step {:03} - {}\n\n", index + 1, intent));
+        output.push_str("```yaml\n");
+        output.push_str(
+            &serde_json::to_string_pretty(step).map_err(|error| error.to_string())?,
+        );
+        output.push_str("\n```\n\n");
+    }
+    Ok(output.trim_end().to_string())
 }
 
 fn workflow_app_from_events(events: &[RecordedEvent]) -> String {
@@ -5910,6 +5127,9 @@ mod tests {
             element_role: None,
             colour_hex: None,
             semantic: Some("channel:Drums".to_string()),
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
         };
 
         add_semantic_tag(&mut event, "midi_note:Crash");
@@ -5946,6 +5166,9 @@ mod tests {
             element_role: Some("50026".to_string()),
             colour_hex: None,
             semantic: semantic.map(str::to_string),
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
         }
     }
 
@@ -6143,6 +5366,9 @@ mod tests {
             element_role: None,
             colour_hex: None,
             semantic: None,
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
         };
         let mut next = current.clone();
         next.timestamp_ms = 5_000;
