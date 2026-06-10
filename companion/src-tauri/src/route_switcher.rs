@@ -236,6 +236,7 @@ mod tests {
     fn event_with_name(name: Option<&str>) -> RecordedEvent {
         RecordedEvent {
             kind: "mousedown".to_string(),
+            event_type: None,
             timestamp_ms: 1,
             x: Some(10),
             y: Some(10),
@@ -243,6 +244,8 @@ mod tests {
             normalized_y: Some(0.1),
             button: Some("left".to_string()),
             key: None,
+            note: None,
+            velocity: None,
             window_title: Some("Test".to_string()),
             app_name: Some("Test App".to_string()),
             window_rect: Some(WindowRect {
