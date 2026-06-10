@@ -1,0 +1,12 @@
+adapter: blender
+mechanism: python-api + cli
+tier: T1
+versions: ["4.x"]
+capabilities:
+  scene_state: full
+  operator_params: full
+  render_state: full
+  export_state: full
+  viewport_gestures: gesture
+known_blockers: []
+setup: Blender executable available on PATH or configured install path

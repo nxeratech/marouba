@@ -45,6 +45,10 @@ const saveButton = document.querySelector<HTMLButtonElement>("#save")!;
 const message = document.querySelector<HTMLParagraphElement>("#message")!;
 const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+const installAbletonCheckbox = document.querySelector<HTMLInputElement>("#install-ableton-checkbox")!;
+const installAbletonButton = document.querySelector<HTMLButtonElement>("#install-ableton")!;
+const installAbletonCustomButton = document.querySelector<HTMLButtonElement>("#install-ableton-custom")!;
+const installAbletonStatus = document.querySelector<HTMLParagraphElement>("#install-ableton-status")!;
 let savedStatus: string | null = null;
 let reviewWasVisible = false;
 let apiToken: string | null = null;
@@ -69,6 +73,22 @@ stopButton.addEventListener("click", async () => {
 
 document.querySelector<HTMLButtonElement>("#open-vault")!.addEventListener("click", async () => {
   await chooseWorkflows();
+});
+
+installAbletonButton.addEventListener("click", async () => {
+  if (!installAbletonCheckbox.checked) {
+    setInstallAbletonStatus("failed", "Tick Install Ableton Remote Script first.");
+    return;
+  }
+  await installAbletonRemoteScript(false);
+});
+
+installAbletonCustomButton.addEventListener("click", async () => {
+  if (!installAbletonCheckbox.checked) {
+    setInstallAbletonStatus("failed", "Tick Install Ableton Remote Script first.");
+    return;
+  }
+  await installAbletonRemoteScript(true);
 });
 
 closeVaultButton.addEventListener("click", () => {
@@ -180,6 +200,32 @@ async function chooseWorkflows() {
     message.textContent = `Unable to load workflows: ${String(error)}`;
     workflowActions.hidden = true;
   }
+}
+
+async function installAbletonRemoteScript(pickFolder: boolean) {
+  installAbletonButton.disabled = true;
+  installAbletonCustomButton.disabled = true;
+  setInstallAbletonStatus("running", pickFolder ? "Choose Ableton's Remote Scripts folder..." : "Installing Ableton Remote Script...");
+  try {
+    const result = await invoke<{ installed: boolean; path: string; message: string }>("install_ableton_remote_script_command", {
+      request: { pick_folder: pickFolder },
+    });
+    setInstallAbletonStatus(
+      result.installed ? "completed" : "failed",
+      `${result.message} Installed at: ${result.path}`,
+    );
+  } catch (error) {
+    setInstallAbletonStatus("failed", String(error));
+  } finally {
+    installAbletonButton.disabled = false;
+    installAbletonCustomButton.disabled = false;
+  }
+}
+
+function setInstallAbletonStatus(status: "running" | "completed" | "failed", text: string) {
+  installAbletonStatus.hidden = false;
+  installAbletonStatus.className = `install-status ${status}`;
+  installAbletonStatus.textContent = text;
 }
 
 async function deleteSelectedWorkflow() {

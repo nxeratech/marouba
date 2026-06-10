@@ -65,7 +65,10 @@ pub(crate) fn workflow_summary_from_path(path: PathBuf) -> Option<VaultWorkflowS
 pub(crate) fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
     let content = workflow_content(name)?;
     let frontmatter = frontmatter_block(&content)?;
-    if yaml_scalar_field(frontmatter, "vault_spec_version").as_deref() == Some("2") {
+    if workflow_version(frontmatter)
+        .ok()
+        .is_some_and(|version| version == 2 || version == 3)
+    {
         let mut events = Vec::new();
         for step in parse_v2_workflow_steps(name).unwrap_or_default() {
             if let Some(route_events) = step.gesture_events() {
@@ -109,9 +112,23 @@ impl VaultReplayStep {
 
 pub(crate) fn parse_v2_workflow_steps(name: &str) -> Option<Vec<VaultReplayStep>> {
     let content = workflow_content(name)?;
+    parse_workflow_steps_from_content(&content).ok()
+}
+
+pub(crate) fn workflow_version_error(name: &str) -> Option<String> {
+    let content = workflow_content(name)?;
     let frontmatter = frontmatter_block(&content)?;
-    if yaml_scalar_field(frontmatter, "vault_spec_version").as_deref() != Some("2") {
-        return None;
+    workflow_version(frontmatter).err()
+}
+
+pub(crate) fn parse_workflow_steps_from_content(
+    content: &str,
+) -> Result<Vec<VaultReplayStep>, String> {
+    let frontmatter =
+        frontmatter_block(content).ok_or_else(|| "workflow frontmatter is missing".to_string())?;
+    let version = workflow_version(frontmatter)?;
+    if version != 2 && version != 3 {
+        return Ok(Vec::new());
     }
 
     let mut steps = Vec::new();
@@ -122,7 +139,7 @@ pub(crate) fn parse_v2_workflow_steps(name: &str) -> Option<Vec<VaultReplayStep>
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
             if in_block {
-                if let Ok(value) = serde_json::from_str::<Value>(&block.join("\n")) {
+                if let Ok(value) = parse_step_value(&block.join("\n")) {
                     let id = value
                         .get("id")
                         .and_then(Value::as_str)
@@ -157,7 +174,7 @@ pub(crate) fn parse_v2_workflow_steps(name: &str) -> Option<Vec<VaultReplayStep>
         }
     }
 
-    Some(steps)
+    Ok(steps)
 }
 
 pub(crate) fn parse_workflow_app_name(name: &str) -> Option<String> {
@@ -166,6 +183,26 @@ pub(crate) fn parse_workflow_app_name(name: &str) -> Option<String> {
     yaml_scalar_field(frontmatter, "app")
 }
 
+fn workflow_version(frontmatter: &str) -> Result<u16, String> {
+    let Some(raw) = yaml_scalar_field(frontmatter, "vault_spec_version") else {
+        return Ok(1);
+    };
+    let version = raw.parse::<u16>().map_err(|_| {
+        format!("Unsupported vault_spec_version {raw}; supported versions are 1, 2, 3")
+    })?;
+    match version {
+        1 | 2 | 3 => Ok(version),
+        _ => Err(format!(
+            "Unsupported vault_spec_version {version}; supported versions are 1, 2, 3"
+        )),
+    }
+}
+
+fn parse_step_value(block: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(block)
+        .or_else(|_| serde_yaml::from_str::<Value>(block))
+        .map_err(|error| error.to_string())
+}
 fn workflow_content(name: &str) -> Option<String> {
     let path = vault_workflows_dir().join(format!("{name}.md"));
     std::fs::read_to_string(path).ok()
@@ -289,5 +326,49 @@ fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {
             }
         }
         _ => format!("{modified:?}"),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_v3_api_uia_gesture_routes_and_signals() {
+        let content = include_str!("../../../tests/fixtures/vault_v3_api_uia_gesture.md");
+        let steps = parse_workflow_steps_from_content(content).expect("v3 workflow parses");
+        assert_eq!(steps.len(), 1);
+        let routes = steps[0]
+            .value
+            .get("routes")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(routes[1].get("type").and_then(Value::as_str), Some("uia"));
+        assert_eq!(
+            routes[2].get("type").and_then(Value::as_str),
+            Some("gesture")
+        );
+        assert_eq!(
+            steps[0]
+                .value
+                .get("signals")
+                .and_then(|signals| signals.get("dwell_before_ms"))
+                .and_then(Value::as_i64),
+            Some(1200)
+        );
+    }
+
+    #[test]
+    fn unknown_vault_version_errors_cleanly() {
+        let content = "---\nvault_spec_version: 99\nid: future\n---\n";
+        let error = parse_workflow_steps_from_content(content).unwrap_err();
+        assert!(error.contains("Unsupported vault_spec_version 99"));
+    }
+
+    #[test]
+    fn missing_vault_version_is_legacy_v1() {
+        let content = "---\nid: legacy\n---\n";
+        let steps = parse_workflow_steps_from_content(content).expect("legacy version accepted");
+        assert!(steps.is_empty());
     }
 }

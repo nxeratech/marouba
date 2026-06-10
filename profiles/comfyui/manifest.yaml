@@ -1,0 +1,12 @@
+adapter: comfyui
+mechanism: http-api + websocket
+tier: T1
+versions: ["0.22.x", "latest"]
+capabilities:
+  workflow_graph: full
+  parameter_values: full
+  queue_state: full
+  output_paths: full
+  ui_controls: partial
+known_blockers: []
+setup: local ComfyUI server reachable on configured port

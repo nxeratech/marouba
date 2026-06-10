@@ -1,0 +1,13 @@
+adapter: browser
+mechanism: chrome-devtools-protocol + uia
+tier: T2
+versions: ["Chrome latest", "Edge latest"]
+capabilities:
+  dom_state: full
+  screenshots: full
+  form_fill: full
+  desktop_ui: partial
+  file_picker: uia
+known_blockers:
+  - DevTools protocol requires browser remote debugging or headless route.
+setup: Chrome or Edge installed locally; DevTools route used when available

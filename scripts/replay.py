@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +14,7 @@ from engine.executor import Executor
 from engine.repairer import Repairer
 from engine.router import Router
 from engine.vault import Vault
+from engine.map_ladder import map_route_for_type
 
 
 def replay_workflow(
@@ -21,6 +24,7 @@ def replay_workflow(
     no_repair: bool = False,
     router: Router | None = None,
     executor: Executor | None = None,
+    repair_mode: bool = False,
 ) -> int:
     vault = Vault(root)
 
@@ -35,19 +39,18 @@ def replay_workflow(
     if workflow.get("mode") == "sequence":
         return replay_sequence(workflow, params, root, vault, executor)
 
-    gesture_routes = [route for route in workflow.get("routes", []) if route.get("type") == "gesture"]
-    if gesture_routes:
-        result = executor._execute_gesture(gesture_routes[0], params)
-        print(f"[Marouba] Gesture replay complete: {result}")
-        return 0
-
-    routes = router.route_order(workflow)
+    routes = router.route_order(workflow, allow_repair_routes=repair_mode)
     print(f"[Marouba] Route order: {', '.join(route['type'] for route in routes)}")
     failures = []
-    for route in routes:
+    repair_events = []
+    consecutive_repairs = 0
+    for index, route in enumerate(routes):
         route_type = route["type"]
-        print(f"[Marouba] Trying route: {route_type}")
-        result = executor.execute(route, params, workflow)
+        if route_type == "ask":
+            break
+        print(f"[Marouba] Trying route: {route_type} ({route.get('map_route', map_route_for_type(route_type))})")
+        result = execute_with_watchdog(executor, route, params, workflow)
+        result.setdefault("map_route", route.get("map_route", map_route_for_type(route_type)))
         if result["success"]:
             output = result.get("output")
             verification = workflow.get("verification", {})
@@ -56,16 +59,39 @@ def replay_workflow(
                 result["error"] = f"Verification failed: file does not exist: {output}"
                 failures.append(result)
                 print(f"[Marouba] Route failed: {route_type}: {result['error']}")
-                continue
+            else:
+                if repair_events:
+                    result["repair_events"] = repair_events
+                print(f"[Marouba] Complete. Output: {output}")
+                log_path = vault.log_run(workflow, result)
+                print(f"[Marouba] Run logged to {log_path.relative_to(root)}")
+                print("[Marouba] Replay complete.")
+                return 0
+        else:
+            failures.append(result)
+            print(f"[Marouba] Route failed: {route_type}: {result['error']}")
 
-            print(f"[Marouba] Complete. Output: {output}")
-            log_path = vault.log_run(workflow, result)
-            print(f"[Marouba] Run logged to {log_path.relative_to(root)}")
-            print("[Marouba] Replay complete.")
-            return 0
-
-        failures.append(result)
-        print(f"[Marouba] Route failed: {route_type}: {result['error']}")
+        next_route = next_executable_route(routes, index + 1)
+        if next_route:
+            repair_event = fallback_repair_event(route, next_route, result)
+            repair_events.append(repair_event)
+            consecutive_repairs += 1
+            print(
+                "[Marouba] Fallback repair event: "
+                f"{repair_event['from_route']} -> {repair_event['to_route']}: {repair_event['reason']}"
+            )
+            if consecutive_repairs >= 3:
+                pause_result = {
+                    "success": False,
+                    "paused": True,
+                    "route_type": route_type,
+                    "map_route": result.get("map_route"),
+                    "error": "Replay paused after 3 consecutive repair fallbacks.",
+                    "repair_events": repair_events,
+                }
+                log_path = vault.log_run(workflow, pause_result)
+                print(f"[Marouba] Replay paused after 3 consecutive repairs. Run logged to {log_path.relative_to(root)}")
+                return 1
 
     print("[Marouba] All routes failed.")
     for failure in failures:
@@ -82,6 +108,50 @@ def replay_workflow(
         return 0
     return 1
 
+def route_timeout_seconds(route: dict, workflow: dict) -> float:
+    timeout = route.get("timeout_seconds") or workflow.get("step_timeout_seconds") or workflow.get("route_timeout_seconds")
+    return float(timeout or 30)
+
+
+def execute_with_watchdog(executor: Executor, route: dict, params: dict, workflow: dict) -> dict:
+    timeout = route_timeout_seconds(route, workflow)
+    results: queue.Queue[dict] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        results.put(executor.execute(route, params, workflow))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        return results.get(timeout=timeout)
+    except queue.Empty:
+        return {
+            "success": False,
+            "route_type": route.get("type"),
+            "map_route": route.get("map_route", map_route_for_type(route.get("type"))),
+            "output": None,
+            "error": f"Route timed out after {timeout:g}s",
+            "duration_ms": round(timeout * 1000),
+        }
+
+
+def next_executable_route(routes: list[dict], start_index: int) -> dict | None:
+    for candidate in routes[start_index:]:
+        if candidate.get("type") != "ask":
+            return candidate
+    return None
+
+
+def fallback_repair_event(route: dict, next_route: dict, result: dict) -> dict:
+    return {
+        "repair_event": True,
+        "event_type": "fallback",
+        "from_route": route.get("type"),
+        "from_map_route": route.get("map_route", map_route_for_type(route.get("type"))),
+        "to_route": next_route.get("type"),
+        "to_map_route": next_route.get("map_route", map_route_for_type(next_route.get("type"))),
+        "reason": str(result.get("error") or "route failed"),
+    }
 
 def replay_sequence(workflow: dict, params: dict, root: Path, vault: Vault, executor: Executor) -> int:
     routes = [route for route in workflow.get("routes", []) if route.get("type") != "ask"]
@@ -113,10 +183,11 @@ def main() -> int:
     parser.add_argument("--workflow", required=True, help="Workflow id or name")
     parser.add_argument("--params", default="{}", help="JSON params for workflow placeholders")
     parser.add_argument("--no-repair", action="store_true", help="Do not prompt for repair when all routes fail")
+    parser.add_argument("--repair-mode", action="store_true", help="Allow explicit r4 visual/vision/manual repair routes during replay")
     args = parser.parse_args()
 
     params = json.loads(args.params)
-    return replay_workflow(args.workflow, params, no_repair=args.no_repair)
+    return replay_workflow(args.workflow, params, no_repair=args.no_repair, repair_mode=args.repair_mode)
 
 
 if __name__ == "__main__":

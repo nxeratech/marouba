@@ -1,0 +1,12 @@
+adapter: ms-paint
+mechanism: null-adapter + gesture
+tier: T3
+versions: ["Windows 10", "Windows 11"]
+capabilities:
+  toolbar_controls: gesture
+  canvas_strokes: gesture
+  shape_drags: gesture
+  colour_palette: gesture
+  parameter_values: none
+known_blockers: []
+setup: bundled Windows Paint application

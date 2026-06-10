@@ -29,6 +29,9 @@ class Executor:
                     "[Marouba] WARNING: executing input-injecting route from marketplace "
                     f"workflow {workflow_id} — ensure you trust this profile"
                 )
+            if route.get("type") == "adapter":
+                output = self._execute_adapter(route, params, workflow)
+                return self._result(True, output=output, started=start, route=route, source=source)
             if route.get("type") == "api":
                 output = self._execute_api(route, params, workflow)
                 return self._result(True, output=output, started=start, route=route, source=source)
@@ -55,6 +58,22 @@ class Executor:
             raise NotImplementedError(f"Route type not implemented: {route.get('type')}")
         except Exception as exc:
             return self._result(False, error=str(exc), started=start, route=route, source=source)
+
+    def _execute_adapter(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if not self.companion.health():
+            raise RuntimeError("Companion is not running; MAP adapter execute requires companion HTTP")
+        response = self.companion.adapter_execute({
+            "route": route,
+            "params": params,
+            "workflow": {
+                "id": workflow.get("id"),
+                "name": workflow.get("name"),
+                "app": workflow.get("app"),
+            },
+        })
+        if not response.get("ok", False):
+            raise RuntimeError(response.get("error", "MAP adapter execute failed"))
+        return response.get("output") or params.get("output_path")
 
     def _execute_api(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
         endpoint = route["endpoint"]

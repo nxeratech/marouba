@@ -38,6 +38,9 @@ class CompanionClient:
     def mouse(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.post("/mouse", payload)
 
+    def adapter_execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/adapter/execute", payload)
+
     def get(self, path: str) -> dict[str, Any]:
         return self._request("GET", path)
 

@@ -1,0 +1,13 @@
+adapter: photoshop
+mechanism: jsx + uxp + uia
+tier: T2
+versions: ["2024", "2025", "latest"]
+capabilities:
+  layer_ops: full
+  export_params: full
+  filter_params: partial
+  brush_strokes: gesture
+  dialog_controls: uia
+known_blockers:
+  - Some plugin dialogs expose no scriptable parameter values.
+setup: Photoshop installed locally; scripting route preferred when available

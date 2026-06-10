@@ -1,46 +1,38 @@
 ---
 app_name: MS Paint
 title_fragment: Paint
+adapter: ms-paint
+tier: T3
+mechanism: null-adapter + gesture
 ui_density: medium
 coordinate_tolerance_px: 6
 supported_routes:
   toolbar_click:
-    - uia
     - gesture
-    - visual
     - ask
   canvas_stroke:
     - gesture
-    - visual
     - ask
   shape_drag:
     - gesture
-    - visual
     - ask
   fill_click:
     - gesture
-    - uia
-    - visual
     - ask
   double_click:
     - gesture
-    - uia
     - ask
   drag_to_target:
     - gesture
-    - visual
     - ask
   text_input:
-    - shortcut
     - gesture
     - ask
   keyboard_shortcut:
-    - shortcut
     - gesture
     - ask
   parameter_drag:
     - gesture
-    - visual
     - ask
   midi_note_entry:
     - ask
@@ -48,8 +40,7 @@ supported_routes:
     - gesture
     - ask
   focus_change:
-    - uia
-    - shortcut
+    - gesture
     - ask
   mouse_move_idle:
     - gesture
@@ -66,6 +57,6 @@ known_shortcuts:
 
 # MS Paint Profile
 
-MS Paint supports UIA for named ribbon controls and gesture replay for canvas actions.
-Canvas strokes, shape drags, and fill clicks should remain gesture-first because the
-creative motion is the workflow.
+MS Paint is the Marouba T3 null adapter reference. It intentionally resolves
+through the formal adapter path to gesture replay only: canvas strokes, shape
+drags, toolbar clicks, and fill clicks remain timing- and coordinate-faithful.

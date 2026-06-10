@@ -16,6 +16,8 @@ def load_profile(name):
 def select_route(event_type, profile=None, element_name=None, action=None):
     if profile is None:
         return "coordinates"
+    if profile.get("adapter") == "ms-paint" and profile.get("tier") == "T3":
+        return "null-adapter:gesture"
     routes = profile.get("supported_routes", {}).get(event_type, [])
     if "api" in routes:
         return "api"
@@ -26,10 +28,10 @@ def select_route(event_type, profile=None, element_name=None, action=None):
     return "coordinates"
 
 
-def test_route_switcher_uia_preferred_when_element_named():
+def test_route_switcher_paint_null_adapter_uses_gesture_when_element_named():
     profile = load_profile("ms-paint.md")
     route = select_route("toolbar_click", profile, element_name="Brushes")
-    assert route == "uia"
+    assert route == "null-adapter:gesture"
 
 
 def test_route_switcher_coordinates_fallback_when_no_profile():

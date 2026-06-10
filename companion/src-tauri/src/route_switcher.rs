@@ -13,12 +13,19 @@ pub enum Route {
     KeyboardShortcut(String),
     Coordinates,
     Api(String),
+    NullAdapterGesture(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppProfile {
     pub app_name: String,
     pub title_fragment: String,
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub mechanism: Option<String>,
     pub supported_routes: HashMap<String, Vec<String>>,
     pub known_shortcuts: HashMap<String, String>,
     pub ui_density: String,
@@ -26,6 +33,9 @@ pub struct AppProfile {
 }
 
 pub fn select_route(event_type: &EventType, app_profile: &AppProfile) -> Route {
+    if let Some(adapter) = null_adapter_id(app_profile) {
+        return Route::NullAdapterGesture(adapter);
+    }
     let key = event_type_key(event_type);
     let routes = app_profile
         .supported_routes
@@ -53,6 +63,9 @@ pub fn select_route_for_event(
     let Some(app_profile) = app_profile else {
         return Route::Coordinates;
     };
+    if let Some(adapter) = null_adapter_id(app_profile) {
+        return Route::NullAdapterGesture(adapter);
+    }
     let key = event_type_key(event_type);
     let routes = app_profile
         .supported_routes
@@ -85,6 +98,25 @@ pub fn load_app_profile(window_title: &str) -> Option<AppProfile> {
         })
 }
 
+fn null_adapter_id(app_profile: &AppProfile) -> Option<String> {
+    let adapter = app_profile.adapter.as_deref().unwrap_or("");
+    let tier = app_profile.tier.as_deref().unwrap_or("");
+    let mechanism = app_profile.mechanism.as_deref().unwrap_or("");
+    let paint_title = app_profile
+        .title_fragment
+        .to_ascii_lowercase()
+        .contains("paint")
+        || app_profile.app_name.to_ascii_lowercase().contains("paint");
+    if paint_title
+        && adapter.eq_ignore_ascii_case("ms-paint")
+        && tier.eq_ignore_ascii_case("T3")
+        && mechanism.to_ascii_lowercase().contains("null")
+    {
+        Some(adapter.to_string())
+    } else {
+        None
+    }
+}
 fn load_profile_file(path: &Path) -> Result<AppProfile, String> {
     let content = fs::read_to_string(path).map_err(|error| format!("{error}"))?;
     let frontmatter = frontmatter_block(&content)
@@ -228,11 +260,30 @@ mod tests {
                 "keyboard_shortcut".to_string(),
                 "Ctrl+S".to_string(),
             )]),
+            adapter: None,
+            tier: None,
+            mechanism: None,
             ui_density: "medium".to_string(),
             coordinate_tolerance_px: 6,
         }
     }
 
+    fn paint_null_profile() -> AppProfile {
+        AppProfile {
+            app_name: "MS Paint".to_string(),
+            title_fragment: "Paint".to_string(),
+            adapter: Some("ms-paint".to_string()),
+            tier: Some("T3".to_string()),
+            mechanism: Some("null-adapter + gesture".to_string()),
+            supported_routes: HashMap::from([(
+                "toolbar_click".to_string(),
+                vec!["gesture".to_string()],
+            )]),
+            known_shortcuts: HashMap::new(),
+            ui_density: "medium".to_string(),
+            coordinate_tolerance_px: 6,
+        }
+    }
     fn event_with_name(name: Option<&str>) -> RecordedEvent {
         RecordedEvent {
             kind: "mousedown".to_string(),
@@ -258,9 +309,22 @@ mod tests {
             element_role: None,
             colour_hex: None,
             semantic: None,
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
         }
     }
 
+    #[test]
+    fn paint_t3_null_adapter_routes_named_toolbar_clicks_to_gesture() {
+        let event = event_with_name(Some("Tools"));
+        let route = select_route_for_event(
+            &EventType::ToolbarClick,
+            &event,
+            Some(&paint_null_profile()),
+        );
+        assert_eq!(route, Route::NullAdapterGesture("ms-paint".to_string()));
+    }
     #[test]
     fn route_switcher_uia_preferred_when_element_named() {
         let event = event_with_name(Some("Save"));

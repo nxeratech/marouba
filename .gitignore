@@ -5,3 +5,4 @@ companion/src-tauri/target/
 companion-mac/src-tauri/target/
 companion/dist/
 *.pem
+companion/src-tauri/crates/*/target/

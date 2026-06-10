@@ -1,0 +1,27 @@
+adapter: ableton-live
+mechanism: remote-script + osc
+tier: T1
+versions: ["11.x", "12.x"]
+capabilities:
+  parameter_values: full
+  midi_notes: full
+  transport_state: full
+  automation_state: full
+  arrangement_ops: full
+  browser_navigation: partial
+  file_drag_payload: partial
+  clip_notes: full
+  clip_envelopes: partial
+  sends: full
+  mixer_volume_pan: full
+  device_parameters: full
+  preset_loading: partial
+  project_state_snapshot: partial
+  uia_coverage: low
+  keyboard_as_midi: fallback_only
+  custom_renderer_widgets: via_api
+known_blockers:
+  - Ableton exposes only the top-level window through Windows UIA in the current probe.
+  - Browser and preset navigation require Remote Script browser helpers beyond the public LOM object list.
+  - Dragging arbitrary payloads into plugin or device-specific drop zones remains gesture fallback until per-device loaders are implemented.
+setup: one-time Remote Script install using AbletonOSC-style localhost OSC bridge; installer copies script to User Library Remote Scripts and user selects AbletonOSC/Marouba control surface in Live preferences

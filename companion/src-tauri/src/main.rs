@@ -1,12 +1,15 @@
 #![windows_subsystem = "windows"]
 
 mod ableton;
+mod ableton_installer;
 mod classifier;
 mod paint;
+mod paint_adapter;
 mod route_switcher;
 mod vault;
 
 use ableton::*;
+use ableton_installer::*;
 use paint::*;
 use vault::*;
 
@@ -104,6 +107,11 @@ struct ReplayWorkflowRequest {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct InstallAbletonRemoteScriptRequest {
+    pick_folder: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct WindowRect {
     left: i32,
@@ -196,6 +204,7 @@ fn main() {
             delete_step,
             open_vault,
             pick_workflows,
+            install_ableton_remote_script_command,
             companion_token
         ])
         .setup(|app| {
@@ -373,6 +382,13 @@ fn companion_token() -> Result<String, String> {
     std::fs::read_to_string(token_path())
         .map(|token| token.trim().to_string())
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn install_ableton_remote_script_command(
+    request: InstallAbletonRemoteScriptRequest,
+) -> Result<AbletonInstallResult, String> {
+    install_ableton_remote_script(request.pick_folder)
 }
 
 fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
@@ -1075,6 +1091,10 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
         Ok(name) => name,
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
     };
+
+    if let Some(error) = workflow_version_error(&name) {
+        return (json!({"status": "failed", "error": error}), 400);
+    }
 
     if let Some(steps) = parse_v2_workflow_steps(&name).filter(|steps| !steps.is_empty()) {
         return replay_v2_workflow(&name, steps);
@@ -2268,7 +2288,9 @@ fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>) -> (Value, u16) {
                         "set_parameter UIA route failed for {}: {}; falling back to gesture",
                         step.id, error
                     ));
-                    route_log.push(json!({"step": step.id, "route": "gesture", "fallback_reason": error}));
+                    route_log.push(
+                        json!({"step": step.id, "route": "gesture", "fallback_reason": error}),
+                    );
                 }
             }
         } else {
@@ -2541,7 +2563,7 @@ fn is_ableton_event(event: &RecordedEvent) -> bool {
             .app_name
             .as_deref()
             .map(title_is_ableton)
-        .unwrap_or(false)
+            .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -2601,7 +2623,10 @@ fn capture_uia_parameter_value_at_point(x: i32, y: i32) -> Option<ParameterValue
         let result = capture_uia_parameter_value_at_point_inner(x, y);
         let _ = sender.send(result);
     });
-    receiver.recv_timeout(Duration::from_millis(500)).ok().flatten()
+    receiver
+        .recv_timeout(Duration::from_millis(500))
+        .ok()
+        .flatten()
 }
 
 #[cfg(target_os = "windows")]
@@ -2855,6 +2880,9 @@ fn route_debug_name(route: &route_switcher::Route) -> String {
         route_switcher::Route::KeyboardShortcut(keys) => format!("shortcut({keys})"),
         route_switcher::Route::Coordinates => "coordinates".to_string(),
         route_switcher::Route::Api(endpoint) => format!("api({endpoint})"),
+        route_switcher::Route::NullAdapterGesture(adapter) => {
+            format!("null-adapter({adapter}):gesture")
+        }
     }
 }
 
@@ -4752,7 +4780,7 @@ fn write_workflow(
 
     let body = format!(
         "---\n\
-vault_spec_version: 2\n\
+vault_spec_version: 3\n\
 id: {}\n\
 name: {}\n\
 app: {}\n\
@@ -4838,6 +4866,7 @@ fn flush_gesture_step(steps: &mut Vec<Value>, gesture_buffer: &mut Vec<RecordedE
         "id": format!("step_{step_number:03}"),
         "type": "legacy_gesture_sequence",
         "intent": "Replay recorded gesture sequence.",
+        "signals": default_step_signals(),
         "routes": [
             {
                 "type": "gesture",
@@ -4887,6 +4916,7 @@ fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value 
             "normalized": normalized,
             "capture_method": capture_method
         },
+        "signals": default_step_signals(),
         "routes": [
             {
                 "type": "uia",
@@ -4902,6 +4932,13 @@ fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value 
     })
 }
 
+fn default_step_signals() -> Value {
+    json!({
+        "dwell_before_ms": Value::Null,
+        "revisit_of": Value::Null,
+        "undo_cluster": Value::Null
+    })
+}
 fn workflow_steps_markdown(steps: &[Value]) -> Result<String, String> {
     let mut output = String::new();
     for (index, step) in steps.iter().enumerate() {
@@ -4911,9 +4948,7 @@ fn workflow_steps_markdown(steps: &[Value]) -> Result<String, String> {
             .unwrap_or("Replay recorded step.");
         output.push_str(&format!("### Step {:03} - {}\n\n", index + 1, intent));
         output.push_str("```yaml\n");
-        output.push_str(
-            &serde_json::to_string_pretty(step).map_err(|error| error.to_string())?,
-        );
+        output.push_str(&serde_json::to_string_pretty(step).map_err(|error| error.to_string())?);
         output.push_str("\n```\n\n");
     }
     Ok(output.trim_end().to_string())
@@ -5323,6 +5358,83 @@ mod tests {
         assert_eq!(ableton_next_browser_row_point(705, &rect), (705, 437));
     }
 
+    #[test]
+    fn paint_null_adapter_shape_drag_uses_live_rect_at_three_positions() {
+        use std::collections::HashMap;
+
+        let profile = route_switcher::AppProfile {
+            app_name: "MS Paint".to_string(),
+            title_fragment: "Paint".to_string(),
+            adapter: Some("ms-paint".to_string()),
+            tier: Some("T3".to_string()),
+            mechanism: Some("null-adapter + gesture".to_string()),
+            supported_routes: HashMap::from([(
+                "shape_drag".to_string(),
+                vec!["gesture".to_string()],
+            )]),
+            known_shortcuts: HashMap::new(),
+            ui_density: "medium".to_string(),
+            coordinate_tolerance_px: 6,
+        };
+        let event = RecordedEvent {
+            kind: "mousedown".to_string(),
+            event_type: None,
+            timestamp_ms: 1_000,
+            x: Some(100),
+            y: Some(100),
+            normalized_x: Some(0.25),
+            normalized_y: Some(0.50),
+            button: Some("left".to_string()),
+            key: None,
+            note: None,
+            velocity: None,
+            window_title: Some("Untitled - Paint".to_string()),
+            app_name: Some("MS Paint".to_string()),
+            window_rect: None,
+            element_name: Some("Canvas".to_string()),
+            element_role: None,
+            colour_hex: None,
+            semantic: None,
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
+        };
+
+        let route = route_switcher::select_route_for_event(
+            &classifier::EventType::ShapeDrag,
+            &event,
+            Some(&profile),
+        );
+        assert_eq!(
+            route,
+            route_switcher::Route::NullAdapterGesture("ms-paint".to_string())
+        );
+
+        let rects = [
+            WindowRect {
+                left: 0,
+                top: 0,
+                width: 640,
+                height: 480,
+            },
+            WindowRect {
+                left: 320,
+                top: 180,
+                width: 960,
+                height: 720,
+            },
+            WindowRect {
+                left: 0,
+                top: 0,
+                width: 1536,
+                height: 864,
+            },
+        ];
+        let expected = [(160, 240), (560, 540), (384, 432)];
+        for (rect, expected_point) in rects.iter().zip(expected) {
+            assert_eq!(resolve_replay_point(&event, Some(rect)), expected_point);
+        }
+    }
     #[test]
     fn ableton_computer_keyboard_note_mapping_matches_vault_format() {
         let window = WindowInfo {

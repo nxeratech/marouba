@@ -8,6 +8,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from engine.companion_client import CompanionClient
+from engine.map_ladder import R4_ROUTE_TYPES, map_route_for_type, with_map_route
 
 
 AvailabilityChecker = Callable[[dict[str, Any]], bool]
@@ -25,6 +26,10 @@ def api_available(route: dict[str, Any], timeout: float = 1.0) -> bool:
             return 200 <= response.status < 500
     except (OSError, URLError, ValueError):
         return False
+
+
+def adapter_available(_: dict[str, Any]) -> bool:
+    return CompanionClient().health()
 
 
 def cli_available(route: dict[str, Any]) -> bool:
@@ -89,14 +94,19 @@ def unavailable(_: dict[str, Any]) -> bool:
 
 
 DEFAULT_CHECKERS: dict[str, AvailabilityChecker] = {
+    "adapter": adapter_available,
     "api": api_available,
     "cli": cli_available,
+    "direct_api": api_available,
+    "app_script": cli_available,
+    "script": cli_available,
     "uia": uia_available,
     "macos_uia": macos_uia_available,
     "keyboard": keyboard_available,
     "shortcut": keyboard_available,
     "manual_repair": manual_repair_available,
     "visual": visual_available,
+    "vision": visual_available,
     "gesture": gesture_available,
 }
 
@@ -107,28 +117,44 @@ class Router:
         if checkers:
             self.checkers.update(checkers)
 
-    def route_order(self, workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    def route_order(self, workflow: dict[str, Any], allow_repair_routes: bool = False) -> list[dict[str, Any]]:
         routes = workflow.get("routes", [])
         ordered_routes: list[dict[str, Any]] = []
+        repair_enabled = allow_repair_routes or bool(workflow.get("repair_mode"))
 
         for route_type in self.platform_fallback_order(workflow):
             if route_type == "ask":
+                continue
+            if route_type in R4_ROUTE_TYPES and not repair_enabled:
                 continue
             for route in routes:
                 if route.get("type") != route_type:
                     continue
                 checker = self.checkers.get(route_type, unavailable)
                 if checker(route):
-                    ordered_routes.append(route)
+                    ordered_routes.append(with_map_route(route))
 
         for route in routes:
-            if route.get("type") == "gesture" and route not in ordered_routes:
+            if route.get("type") == "gesture" and not self._already_ordered(route, ordered_routes):
                 checker = self.checkers.get("gesture", unavailable)
                 if checker(route):
-                    ordered_routes.append(route)
+                    ordered_routes.append(with_map_route(route))
 
-        ordered_routes.append({"type": "ask"})
+        ordered_routes.append({"type": "ask", "map_route": "r4"})
         return ordered_routes
+
+    def route_group(self, route_type: str | None) -> str:
+        return map_route_for_type(route_type)
+
+    def _already_ordered(self, route: dict[str, Any], ordered_routes: list[dict[str, Any]]) -> bool:
+        comparable = dict(route)
+        comparable.pop("map_route", None)
+        for candidate in ordered_routes:
+            candidate_comparable = dict(candidate)
+            candidate_comparable.pop("map_route", None)
+            if candidate_comparable == comparable:
+                return True
+        return False
 
     def platform_fallback_order(self, workflow: dict[str, Any]) -> list[str]:
         order = list(workflow.get("fallback_order", []))

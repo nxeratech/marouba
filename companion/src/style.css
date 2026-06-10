@@ -92,6 +92,56 @@ button:disabled {
   opacity: 0.45;
 }
 
+.adapter-install {
+  background: #101622;
+  border: 1px solid #232b3b;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.adapter-checkbox {
+  align-items: center;
+  color: #dbe5f3;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 8px;
+}
+
+.adapter-checkbox input {
+  accent-color: #7B2FBE;
+}
+
+.adapter-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.install-status {
+  color: #a7b4c8;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.install-status[hidden] {
+  display: none;
+}
+
+.install-status.running {
+  color: #facc15;
+}
+
+.install-status.completed {
+  color: #86efac;
+}
+
+.install-status.failed {
+  color: #f87171;
+}
+
 .panel {
   background: #141924;
   border: 1px solid #232b3b;

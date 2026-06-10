@@ -2032,9 +2032,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "marouba-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "marouba-companion"
 version = "0.3.0"
 dependencies = [
+ "marouba-adapter",
  "rand",
  "rfd",
  "serde",
