@@ -3118,7 +3118,12 @@ fn is_ableton_note_keyboard_event(event: &RecordedEvent) -> bool {
     if !is_ableton_event(event) {
         return false;
     }
-    if matches!(event.kind.as_str(), "note_on" | "note_off") {
+    if matches!(event.kind.as_str(), "note_on" | "note_off")
+        || matches!(
+            event.event_type.as_deref(),
+            Some("note_on") | Some("note_off")
+        )
+    {
         return true;
     }
     event
@@ -3130,6 +3135,13 @@ fn is_ableton_note_keyboard_event(event: &RecordedEvent) -> bool {
                 .any(|part| part.trim().starts_with("midi_note:"))
         })
         .unwrap_or(false)
+        || (event.kind == "keydown"
+            && event
+                .key
+                .as_deref()
+                .and_then(|key| vk_from_recorded_key(key).ok())
+                .and_then(|vk| ableton_computer_midi_note_for_vk(vk as i32))
+                .is_some())
 }
 
 fn prepare_ableton_note_replay_context(
@@ -3151,7 +3163,8 @@ fn prepare_ableton_note_replay_context(
 
     if let Some((x, y)) = ableton_piano_roll_focus_point(replay_rect) {
         write_debug_log(&format!(
-            "ableton note replay preflight: clicking geometry grid point at ({x},{y})"
+            "ableton note replay preflight: rect={} formula=x:left+width*0.65 y:top+height*0.65 resolved=({x},{y})",
+            format_window_rect(replay_rect)
         ));
         send_ableton_left_click(x, y, Duration::from_millis(60));
         thread::sleep(Duration::from_millis(400));
