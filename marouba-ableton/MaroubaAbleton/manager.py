@@ -1,5 +1,6 @@
 from __future__ import absolute_import, print_function
 
+import json
 import logging
 import os
 import time
@@ -67,6 +68,7 @@ class Manager(ControlSurface):
         )
         self._osc_server.add_handler("/marouba/transport/snapshot", self._transport)
         self._osc_server.add_handler("/marouba/midi/drain", self._midi_drain)
+        self._osc_server.add_handler("/marouba/execute", self._execute)
         self._osc_server.add_handler("/live/test", self._test)
         self._osc_server.add_handler("/live/application/get/version", self._version)
 
@@ -147,7 +149,7 @@ class Manager(ControlSurface):
             self._last_parameter_snapshot = self._parameter_snapshot(parameter)
 
     def _health(self, _params):
-        return ("ok", "marouba-ableton", "midi")
+        return ("ok", "marouba-ableton", "midi", "execute", "execute-v3")
 
     def _selected_parameter(self, _params):
         parameter = self._selected_parameter_object()
@@ -187,6 +189,342 @@ class Manager(ControlSurface):
                 ]
             )
         return tuple(response)
+
+
+    def _execute(self, params):
+        try:
+            action = str(params[0]) if len(params) > 0 else ""
+            payload = {}
+            if len(params) > 1 and params[1]:
+                payload = json.loads(params[1])
+            result = self._execute_action(action, payload)
+            return ("ok", json.dumps(result, sort_keys=True))
+        except Exception as error:
+            logger.exception("Ableton LOM execute failed")
+            return ("error", str(error))
+
+    def _execute_action(self, action, payload):
+        action = (action or payload.get("action") or "").strip()
+        if action in ("set_parameter", "parameter.set", "set_param", "ableton_lom"):
+            return self._execute_set_parameter(payload)
+        if action in ("play_note", "midi.play_note", "ableton_midi"):
+            return self._execute_play_note(payload)
+        if action in ("transport", "set_transport", "transport.set"):
+            return self._execute_transport(payload)
+        if action in ("set_send", "send.set"):
+            return self._execute_set_send(payload)
+        if action in ("automation_arm", "automation.set"):
+            return self._execute_automation(payload)
+        if action in ("arrangement", "arrangement_op"):
+            return self._execute_arrangement(payload)
+        if action in ("load_instrument", "load_preset", "browser.load"):
+            raise RuntimeError("Ableton browser loading is not exposed by the public LOM; use UIA/gesture fallback")
+        raise RuntimeError("unsupported Ableton action: %s" % action)
+
+    def _route_payload(self, payload):
+        route = payload.get("route")
+        if isinstance(route, dict):
+            merged = dict(route)
+            for key, value in payload.items():
+                if key != "route" and key not in merged:
+                    merged[key] = value
+            return merged
+        return payload
+
+    def _execute_set_parameter(self, payload):
+        payload = self._route_payload(payload)
+        try:
+            parameter = self._resolve_parameter(payload)
+        except Exception as error:
+            send_name = self._send_name_from_parameter_payload(payload)
+            if send_name is None:
+                raise
+            send_payload = dict(payload)
+            send_payload["send"] = send_name
+            result = self._execute_set_send(send_payload)
+            result["action"] = "set_parameter"
+            result["mapped_to"] = "send"
+            result["fallback_reason"] = str(error)
+            return result
+        raw_value = payload.get("value")
+        if isinstance(raw_value, dict):
+            raw_value = raw_value.get("normalized", raw_value.get("raw"))
+        normalized = self._float_or_none(raw_value)
+        if normalized is None:
+            normalized = self._float_or_none(payload.get("normalized"))
+        if normalized is None:
+            raise RuntimeError("set_parameter route missing numeric value")
+        minimum = self._float_or_default(getattr(parameter, "min", 0.0), 0.0)
+        maximum = self._float_or_default(getattr(parameter, "max", 1.0), 1.0)
+        value = minimum + max(0.0, min(1.0, normalized)) * (maximum - minimum)
+        parameter.value = value
+        snapshot = self._parameter_snapshot(parameter)
+        return {
+            "action": "set_parameter",
+            "route": "api",
+            "track": snapshot[0],
+            "device": snapshot[1],
+            "parameter": snapshot[2],
+            "display_value": snapshot[3],
+            "normalized_value": snapshot[4],
+            "target": snapshot[5],
+        }
+
+    def _execute_play_note(self, payload):
+        payload = self._route_payload(payload)
+        clip = self._resolve_midi_clip_for_write()
+        pitch = int(payload.get("pitch", 60))
+        velocity = int(payload.get("velocity", 100))
+        start_time = self._float_or_default(payload.get("start_time"), 0.0)
+        duration = self._float_or_default(payload.get("duration"), None)
+        if duration is None:
+            duration_ms = self._float_or_default(payload.get("duration_ms"), 250.0)
+            tempo = self._float_or_default(payload.get("tempo"), self._current_tempo())
+            duration = duration_ms * tempo / 60000.0 if tempo > 0 else 0.5
+        note = {
+            "pitch": pitch,
+            "start_time": start_time,
+            "duration": max(0.03125, duration),
+            "velocity": velocity,
+            "mute": False,
+        }
+        self._add_note_to_clip(clip, note)
+        return {
+            "action": "play_note",
+            "route": "api",
+            "pitch": pitch,
+            "velocity": velocity,
+            "start_time": start_time,
+            "duration": note["duration"],
+            "clip": self._safe_name(clip),
+        }
+
+    def _execute_transport(self, payload):
+        payload = self._route_payload(payload)
+        song = self._song()
+        command = str(payload.get("command") or payload.get("state") or "").lower()
+        if command in ("play", "start"):
+            try:
+                song.start_playing()
+            except Exception:
+                song.is_playing = True
+        elif command in ("stop",):
+            try:
+                song.stop_playing()
+            except Exception:
+                song.is_playing = False
+        elif command in ("toggle",):
+            song.is_playing = not bool(getattr(song, "is_playing", False))
+        if "is_playing" in payload:
+            desired = bool(payload.get("is_playing"))
+            if desired and not bool(getattr(song, "is_playing", False)):
+                song.start_playing()
+            if not desired and bool(getattr(song, "is_playing", False)):
+                song.stop_playing()
+        for field in ("record_mode", "session_record", "arrangement_overdub", "loop"):
+            if field in payload and hasattr(song, field):
+                setattr(song, field, bool(payload.get(field)))
+        if "tempo" in payload:
+            song.tempo = float(payload.get("tempo"))
+        return dict(self._read_transport_snapshot(), action="transport", route="api")
+
+    def _execute_set_send(self, payload):
+        payload = self._route_payload(payload)
+        track = self._resolve_track(payload)
+        sends = list(getattr(getattr(track, "mixer_device", None), "sends", []) or [])
+        if not sends:
+            raise RuntimeError("selected track has no sends")
+        index = payload.get("send_index", payload.get("send", payload.get("param", 0)))
+        if isinstance(index, str) and index.strip().upper().startswith("A"):
+            index = ord(index.strip().upper()[0]) - ord("A")
+        index = int(index)
+        if index < 0 or index >= len(sends):
+            raise RuntimeError("send index out of range: %s" % index)
+        send = sends[index]
+        normalized = self._float_or_none(payload.get("value"))
+        if normalized is None:
+            normalized = self._float_or_none(payload.get("normalized"))
+        if normalized is None:
+            raise RuntimeError("set_send route missing value")
+        minimum = self._float_or_default(getattr(send, "min", 0.0), 0.0)
+        maximum = self._float_or_default(getattr(send, "max", 1.0), 1.0)
+        send.value = minimum + max(0.0, min(1.0, normalized)) * (maximum - minimum)
+        return {
+            "action": "set_send",
+            "route": "api",
+            "track": self._safe_name(track),
+            "send_index": index,
+            "display_value": self._display_parameter_value(send, send.value),
+            "normalized_value": self._normalized_parameter_value(send, send.value),
+        }
+
+    def _execute_automation(self, payload):
+        payload = self._route_payload(payload)
+        song = self._song()
+        for field in ("session_automation_record", "arrangement_overdub", "record_mode"):
+            if field in payload and hasattr(song, field):
+                setattr(song, field, bool(payload.get(field)))
+        return {
+            "action": "automation_arm",
+            "route": "api",
+            "session_automation_record": bool(getattr(song, "session_automation_record", False)),
+            "arrangement_overdub": bool(getattr(song, "arrangement_overdub", False)),
+            "record_mode": bool(getattr(song, "record_mode", False)),
+        }
+
+    def _execute_arrangement(self, payload):
+        payload = self._route_payload(payload)
+        operation = str(payload.get("operation") or payload.get("command") or "").lower()
+        if operation in ("set_loop", "loop"):
+            song = self._song()
+            if "loop_start" in payload:
+                song.loop_start = float(payload.get("loop_start"))
+            if "loop_length" in payload:
+                song.loop_length = float(payload.get("loop_length"))
+            if "loop" in payload:
+                song.loop = bool(payload.get("loop"))
+            return {"action": "arrangement", "operation": "set_loop", "route": "api"}
+        raise RuntimeError("arrangement operation not implemented via LOM: %s" % operation)
+
+    def _target_parts(self, payload):
+        target = str(payload.get("target") or "")
+        parts = {}
+        for item in target.split("/"):
+            if ":" not in item:
+                continue
+            key, value = item.split(":", 1)
+            parts[key.strip().lower()] = value.strip()
+        return parts
+
+    def _resolve_track(self, payload):
+        parts = self._target_parts(payload)
+        track_name = str(payload.get("track") or payload.get("track_name") or parts.get("track") or "").lower()
+        track_index = payload.get("track_index")
+        tracks = list(getattr(self._song(), "tracks", []) or [])
+        if track_index is not None:
+            try:
+                return tracks[int(track_index)]
+            except Exception:
+                pass
+        if track_name:
+            for track in tracks:
+                if self._safe_name(track).lower() == track_name:
+                    return track
+        track = self._selected_track()
+        if track is None:
+            raise RuntimeError("selected track unavailable")
+        return track
+
+    def _resolve_device(self, payload, track):
+        parts = self._target_parts(payload)
+        device_name = str(payload.get("device") or payload.get("device_name") or parts.get("device") or "").lower()
+        devices = list(getattr(track, "devices", []) or [])
+        if device_name:
+            for device in devices:
+                if self._safe_name(device).lower() == device_name:
+                    return device
+        device = self._selected_device()
+        if device is not None:
+            return device
+        if devices:
+            return devices[0]
+        raise RuntimeError("device unavailable")
+
+    def _resolve_parameter(self, payload):
+        parts = self._target_parts(payload)
+        track = self._resolve_track(payload)
+        device = self._resolve_device(payload, track)
+        param_name = str(payload.get("param") or payload.get("parameter") or payload.get("element_name") or parts.get("parameter") or "").lower()
+        if param_name:
+            for parameter in list(getattr(device, "parameters", []) or []):
+                if self._safe_name(parameter).lower() == param_name:
+                    return parameter
+        parameter = self._selected_parameter_object()
+        if parameter is not None:
+            return parameter
+        raise RuntimeError("parameter unavailable: %s" % param_name)
+
+    def _send_name_from_parameter_payload(self, payload):
+        parts = self._target_parts(payload)
+        raw_name = str(
+            payload.get("param")
+            or payload.get("parameter")
+            or payload.get("element_name")
+            or parts.get("parameter")
+            or ""
+        ).strip()
+        if not raw_name:
+            return None
+        first = raw_name[0].upper()
+        if not first.isalpha():
+            return None
+        if len(raw_name) == 1 or raw_name[1] in ("-", "_", " ", ":"):
+            return first
+        return None
+
+    def _resolve_midi_clip_for_write(self):
+        for clip in self._candidate_midi_clips():
+            if self._clip_is_midi(clip):
+                return clip
+        track = self._selected_track()
+        if track is None:
+            raise RuntimeError("no selected track for MIDI note write")
+        for slot in list(getattr(track, "clip_slots", []) or []):
+            try:
+                if not slot.has_clip and hasattr(slot, "create_clip"):
+                    slot.create_clip(4.0)
+                    return slot.clip
+            except Exception:
+                continue
+        raise RuntimeError("no writable MIDI clip available")
+
+    def _add_note_to_clip(self, clip, note):
+        if hasattr(clip, "add_new_notes"):
+            errors = []
+            candidates = []
+            try:
+                import Live
+                spec_type = Live.Clip.MidiNoteSpecification
+                for args in (
+                    (),
+                    (note["pitch"], note["start_time"], note["duration"], note["velocity"], note["mute"]),
+                ):
+                    try:
+                        spec = spec_type(*args)
+                        spec.pitch = note["pitch"]
+                        spec.start_time = note["start_time"]
+                        spec.duration = note["duration"]
+                        spec.velocity = note["velocity"]
+                        spec.mute = note["mute"]
+                        candidates.append((spec,))
+                    except Exception as error:
+                        errors.append("MidiNoteSpecification build failed: %s" % error)
+            except Exception as error:
+                errors.append("Live.Clip.MidiNoteSpecification unavailable: %s" % error)
+            candidates.extend([
+                [(note["pitch"], note["start_time"], note["duration"], note["velocity"], note["mute"])],
+                ((note["pitch"], note["start_time"], note["duration"], note["velocity"], note["mute"]),),
+            ])
+            for candidate in candidates:
+                try:
+                    clip.add_new_notes(candidate)
+                    return
+                except Exception as error:
+                    errors.append(str(error))
+            raise RuntimeError("add_new_notes failed: %s" % "; ".join(errors[-6:]))
+        raise RuntimeError("Clip.add_new_notes unavailable in this Live version")
+
+    def _float_or_none(self, value):
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _float_or_default(self, value, default):
+        parsed = self._float_or_none(value)
+        return default if parsed is None else parsed
 
     def receive_midi(self, midi_bytes):
         # Control-surface MIDI input is intentionally not Marouba's primary

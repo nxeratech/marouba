@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::process::{Child, Command};
@@ -172,6 +172,16 @@ impl AbletonBridgeSupervisor {
         request_bridge_midi_events(&self.config)
     }
 
+    pub(crate) fn execute(&mut self, payload: Value) -> Result<Value, String> {
+        let health = self.health_check();
+        if health.status != "ok" {
+            return Err(health
+                .message
+                .unwrap_or_else(|| "Ableton bridge unavailable".to_string()));
+        }
+        request_bridge_execute(&self.config, payload)
+    }
+
     fn spawn_bridge(&self) -> Result<Child, String> {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(exe);
@@ -212,7 +222,7 @@ pub(crate) fn run_ableton_osc_bridge() -> Result<(), String> {
     let server = Server::http(format!("127.0.0.1:{}", config.health_port))
         .map_err(|error| format!("failed to bind bridge health server: {error}"))?;
 
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
         let response = match (request.method(), request.url()) {
             (&Method::Get, "/health") => {
                 let health = osc
@@ -290,6 +300,21 @@ pub(crate) fn run_ableton_osc_bridge() -> Result<(), String> {
                     ),
                 }
             }
+            (&Method::Post, "/execute") => {
+                let mut body = String::new();
+                let payload = match request.as_reader().read_to_string(&mut body) {
+                    Ok(_) => serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({})),
+                    Err(_) => json!({}),
+                };
+                let result = osc
+                    .lock()
+                    .map_err(|_| "bridge probe lock poisoned".to_string())
+                    .and_then(|mut probe| probe.execute(&payload));
+                match result {
+                    Ok(value) => json_response(json!({"status": "ok", "output": value}), 200),
+                    Err(error) => json_response(json!({"status": "degraded", "message": error}), 200),
+                }
+            }
             _ => json_response(json!({"error": "not found"}), 404),
         };
         let _ = request.respond(response);
@@ -316,16 +341,7 @@ impl OscHealthProbe {
 
     fn health(&mut self) -> Result<serde_json::Value, String> {
         let (address, args) = self.request("/marouba/health", &[])?;
-        let ok = address == "/marouba/health" && args.iter().any(|arg| arg == "ok");
-        Ok(json!({
-            "status": if ok { "ok" } else { "degraded" },
-            "message": if ok { "Live script responded" } else { "unexpected OSC health response" },
-            "address": address,
-            "args": args,
-            "send_port": self.config.send_port,
-            "recv_port": self.config.recv_port,
-            "health_port": self.config.health_port
-        }))
+        Ok(health_response_value(&self.config, address, args))
     }
 
     fn parameter_snapshot(&mut self) -> Result<AbletonParameterSnapshot, String> {
@@ -422,6 +438,33 @@ impl OscHealthProbe {
         Ok(events)
     }
 
+    fn execute(&mut self, payload: &Value) -> Result<Value, String> {
+        let route = payload.get("route").unwrap_or(payload);
+        let action = route
+            .get("action")
+            .or_else(|| payload.get("action"))
+            .and_then(Value::as_str)
+            .or_else(|| route.get("api").and_then(Value::as_str))
+            .unwrap_or("execute");
+        let payload_text = serde_json::to_string(payload)
+            .map_err(|error| format!("Ableton execute payload encode failed: {error}"))?;
+        let (address, args) = self.request("/marouba/execute", &[action, &payload_text])?;
+        if address != "/marouba/execute" {
+            return Err(format!("unexpected OSC response address: {address}"));
+        }
+        if args.first().map(String::as_str) != Some("ok") {
+            return Err(args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "Ableton LOM execute failed".to_string()));
+        }
+        let body = args.get(1).cloned().unwrap_or_else(|| "{}".to_string());
+        match serde_json::from_str::<Value>(&body) {
+            Ok(value) => Ok(value),
+            Err(_) => Ok(json!({"message": body})),
+        }
+    }
+
     fn request(&mut self, address: &str, args: &[&str]) -> Result<(String, Vec<String>), String> {
         let message = osc_message(address, args);
         self.socket
@@ -438,6 +481,34 @@ impl OscHealthProbe {
             .map_err(|error| format!("Live Remote Script did not answer: {error}"))?;
         decode_osc_message(&buffer[..len])
     }
+}
+
+fn health_response_value(
+    config: &AbletonBridgeConfig,
+    address: String,
+    args: Vec<String>,
+) -> serde_json::Value {
+    let script_ok = address == "/marouba/health" && args.iter().any(|arg| arg == "ok");
+    let execute_ready = args.iter().any(|arg| arg == "execute");
+    let execute_v3_ready = args.iter().any(|arg| arg == "execute-v3");
+    let ok = script_ok && execute_ready && execute_v3_ready;
+    json!({
+        "status": if ok { "ok" } else { "degraded" },
+        "message": if ok {
+            "Live script responded with execute-v3 support"
+        } else if script_ok && execute_ready {
+            "Live script responded but execute-v3 support is not loaded; reload MaroubaAbleton in Live"
+        } else if script_ok {
+            "Live script responded but execute support is not loaded; reload MaroubaAbleton in Live"
+        } else {
+            "unexpected OSC health response"
+        },
+        "address": address,
+        "args": args,
+        "send_port": config.send_port,
+        "recv_port": config.recv_port,
+        "health_port": config.health_port
+    })
 }
 
 fn request_bridge_health(config: &AbletonBridgeConfig) -> Result<AbletonBridgeHealth, String> {
@@ -480,6 +551,20 @@ fn request_bridge_transport_snapshot(
         .map_err(|error| format!("bridge transport snapshot parse failed: {error}; body={body}"))
 }
 
+fn request_bridge_execute(config: &AbletonBridgeConfig, payload: Value) -> Result<Value, String> {
+    let body = request_bridge_post(config, "/execute", &payload)?;
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("bridge execute JSON parse failed: {error}; body={body}"))?;
+    if value.get("status").and_then(Value::as_str) == Some("degraded") {
+        return Err(value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Ableton execute unavailable")
+            .to_string());
+    }
+    Ok(value.get("output").cloned().unwrap_or(value))
+}
+
 fn request_bridge_midi_events(config: &AbletonBridgeConfig) -> Result<Vec<AbletonMidiEvent>, String> {
     let body = request_bridge_path(config, "/midi/drain")?;
     let value: serde_json::Value = serde_json::from_str(&body)
@@ -502,12 +587,35 @@ fn request_bridge_midi_events(config: &AbletonBridgeConfig) -> Result<Vec<Ableto
 }
 
 fn request_bridge_path(config: &AbletonBridgeConfig, path: &str) -> Result<String, String> {
+    request_bridge_http(config, "GET", path, None)
+}
+
+fn request_bridge_post(config: &AbletonBridgeConfig, path: &str, payload: &Value) -> Result<String, String> {
+    let body = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+    request_bridge_http(config, "POST", path, Some(&body))
+}
+
+fn request_bridge_http(
+    config: &AbletonBridgeConfig,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<String, String> {
     let mut stream = TcpStream::connect(("127.0.0.1", config.health_port))
         .map_err(|error| format!("osc bridge health server unavailable: {error}"))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(1200)))
         .map_err(|error| error.to_string())?;
-    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let body = body.unwrap_or("");
+    let request = if method == "POST" {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.as_bytes().len(),
+            body
+        )
+    } else {
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    };
     stream
         .write_all(request.as_bytes())
         .map_err(|error| error.to_string())?;
@@ -664,4 +772,50 @@ mod tests {
         assert_eq!(decoded.0, "/marouba/parameter/selected");
         assert_eq!(decoded.1, vec!["error", "none"]);
     }
+    #[test]
+    fn health_requires_execute_capability() {
+        let config = AbletonBridgeConfig {
+            host: "127.0.0.1".to_string(),
+            send_port: 12000,
+            recv_port: 12001,
+            health_port: 12002,
+        };
+        let old_script = health_response_value(
+            &config,
+            "/marouba/health".to_string(),
+            vec!["ok".to_string(), "marouba-ableton".to_string(), "midi".to_string()],
+        );
+        assert_eq!(old_script.get("status").and_then(Value::as_str), Some("degraded"));
+        assert!(old_script
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("execute support is not loaded"));
+
+        let execute_without_v3 = health_response_value(
+            &config,
+            "/marouba/health".to_string(),
+            vec![
+                "ok".to_string(),
+                "marouba-ableton".to_string(),
+                "midi".to_string(),
+                "execute".to_string(),
+            ],
+        );
+        assert_eq!(execute_without_v3.get("status").and_then(Value::as_str), Some("degraded"));
+
+        let new_script = health_response_value(
+            &config,
+            "/marouba/health".to_string(),
+            vec![
+                "ok".to_string(),
+                "marouba-ableton".to_string(),
+                "midi".to_string(),
+                "execute".to_string(),
+                "execute-v3".to_string(),
+            ],
+        );
+        assert_eq!(new_script.get("status").and_then(Value::as_str), Some("ok"));
+    }
+
 }

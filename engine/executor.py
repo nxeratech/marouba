@@ -76,6 +76,10 @@ class Executor:
         return response.get("output") or params.get("output_path")
 
     def _execute_api(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        api_name = str(route.get("api", ""))
+        if api_name.startswith("ableton"):
+            return self._execute_ableton_api(route, params, workflow)
+
         endpoint = route["endpoint"]
         payload_path = self.root / str(route["payload_template"])
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -100,6 +104,26 @@ class Executor:
             time.sleep(2)
 
         raise TimeoutError(f"Timed out waiting for ComfyUI prompt {prompt_id}")
+
+    def _execute_ableton_api(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if not self.companion.health():
+            raise RuntimeError("Companion is not running; Ableton LOM routes require companion HTTP")
+        payload = {
+            "route": route,
+            "params": params,
+            "workflow": {
+                "id": workflow.get("id"),
+                "name": workflow.get("name"),
+                "app": workflow.get("app"),
+            },
+        }
+        response = self.companion.ableton_execute(payload)
+        if not response.get("ok", False):
+            raise RuntimeError(response.get("error", "Ableton LOM execute failed"))
+        output = response.get("output")
+        if isinstance(output, dict) and output.get("fallback_reason"):
+            raise RuntimeError(str(output["fallback_reason"]))
+        return params.get("output_path") or (json.dumps(output, sort_keys=True) if output is not None else None)
 
     def _execute_uia(self, route: dict[str, Any], params: dict[str, Any]) -> str | None:
         payload = {

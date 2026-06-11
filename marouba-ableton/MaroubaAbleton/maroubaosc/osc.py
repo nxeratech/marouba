@@ -120,7 +120,11 @@ class MaroubaOscServer(object):
                     continue
                 response = callback(tuple(params))
                 if response is not None:
-                    self.send(address, tuple(response), (remote_addr[0], OSC_RESPONSE_PORT))
+                    # Reply to the actual sender. Barry's bridge binds its probe
+                    # socket to OSC_RESPONSE_PORT, so this preserves the fixed-port
+                    # path while also allowing one-shot probes that listen on their
+                    # ephemeral source port.
+                    self.send(address, tuple(response), remote_addr)
             except Exception:
                 logger.exception("Error handling OSC message")
 

@@ -41,6 +41,9 @@ class CompanionClient:
     def adapter_execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.post("/adapter/execute", payload)
 
+    def ableton_execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/ableton/execute", payload)
+
     def get(self, path: str) -> dict[str, Any]:
         return self._request("GET", path)
 

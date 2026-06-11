@@ -1534,6 +1534,21 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
                     });
                 json_response(result, 200)
             }
+            (Method::Post, "/ableton/execute") => {
+                let payload: Value = read_json(&mut request);
+                let result = ableton_bridge_from_state(&state)
+                    .ok_or_else(|| "Ableton bridge state unavailable".to_string())
+                    .and_then(|bridge| {
+                        bridge
+                            .lock()
+                            .map_err(|_| "Ableton bridge lock poisoned".to_string())
+                            .and_then(|mut guard| guard.execute(payload))
+                    });
+                match result {
+                    Ok(output) => json_response(json!({"ok": true, "output": output}), 200),
+                    Err(error) => json_response(json!({"ok": false, "error": error}), 200),
+                }
+            }
             (Method::Get, "/window") => json_response(json!(active_window()), 200),
             (Method::Get, "/workflows") => {
                 let (body, status) = list_saved_workflows();
@@ -1572,7 +1587,7 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
             }
             (Method::Post, "/replay") => {
                 let payload: ReplayWorkflowRequest = read_json(&mut request);
-                let (body, status) = start_replay_workflow(payload);
+                let (body, status) = start_replay_workflow(payload, state.clone());
                 json_response(body, status)
             }
             (Method::Post, "/workflow/delete") => {
@@ -1625,7 +1640,7 @@ fn marouba_root_dir() -> PathBuf {
     PathBuf::from(r"C:\Share\Marouba")
 }
 
-fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
+fn start_replay_workflow(payload: ReplayWorkflowRequest, state: Arc<Mutex<AppState>>) -> (Value, u16) {
     let name = match safe_workflow_name(&payload.name) {
         Ok(name) => name,
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
@@ -1636,7 +1651,7 @@ fn start_replay_workflow(payload: ReplayWorkflowRequest) -> (Value, u16) {
     }
 
     if let Some(steps) = parse_v2_workflow_steps(&name).filter(|steps| !steps.is_empty()) {
-        return replay_v2_workflow(&name, steps);
+        return replay_v2_workflow(&name, steps, &state);
     }
 
     if let Some(events) = parse_gesture_workflow(&name) {
@@ -2779,7 +2794,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     )
 }
 
-fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>) -> (Value, u16) {
+fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>, state: &Arc<Mutex<AppState>>) -> (Value, u16) {
     let all_events: Vec<RecordedEvent> = steps
         .iter()
         .filter_map(VaultReplayStep::gesture_events)
@@ -2815,6 +2830,27 @@ fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>) -> (Value, u16) {
     let mut replayed_steps = 0usize;
     let mut route_log = Vec::new();
     for step in steps {
+        if let Some(api_route) = api_route_for_step(&step) {
+            match replay_api_step(&step, api_route.clone(), state) {
+                Ok(output) => {
+                    replayed_steps += 1;
+                    route_log.push(json!({"step": step.id, "route": "api", "output": output}));
+                    continue;
+                }
+                Err(error) => {
+                    write_debug_log(&format!(
+                        "api route failed for {}: {}; falling back to lower route",
+                        step.id, error
+                    ));
+                    route_log.push(json!({
+                        "step": step.id,
+                        "route": "api",
+                        "fallback_reason": error
+                    }));
+                }
+            }
+        }
+
         if step.step_type == "set_parameter" {
             match replay_set_parameter_step(&step) {
                 Ok(route) => {
@@ -2872,6 +2908,41 @@ fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>) -> (Value, u16) {
         }),
         200,
     )
+}
+
+fn api_route_for_step(step: &VaultReplayStep) -> Option<Value> {
+    step.value
+        .get("routes")?
+        .as_array()?
+        .iter()
+        .find(|route| route.get("type").and_then(Value::as_str) == Some("api"))
+        .cloned()
+}
+
+fn replay_api_step(
+    step: &VaultReplayStep,
+    route: Value,
+    state: &Arc<Mutex<AppState>>,
+) -> Result<Value, String> {
+    let api_name = route.get("api").and_then(Value::as_str).unwrap_or_default();
+    if !api_name.starts_with("ableton") {
+        return Err(format!("unsupported companion api route: {api_name}"));
+    }
+    let payload = json!({
+        "action": route
+            .get("action")
+            .and_then(Value::as_str)
+            .or_else(|| route.get("api").and_then(Value::as_str))
+            .unwrap_or("execute"),
+        "route": route,
+        "step": step.value,
+    });
+    let bridge = ableton_bridge_from_state(state)
+        .ok_or_else(|| "Ableton bridge state unavailable".to_string())?;
+    let mut guard = bridge
+        .lock()
+        .map_err(|_| "Ableton bridge lock poisoned".to_string())?;
+    guard.execute(payload)
 }
 
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {

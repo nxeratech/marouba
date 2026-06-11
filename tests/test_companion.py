@@ -52,3 +52,39 @@ def test_executor_falls_back_to_pywinauto_stub_when_companion_unavailable(monkey
 
     assert result["success"] is False
     assert "Companion is not running and pywinauto is unavailable" in result["error"]
+
+class AbletonCompanion:
+    def __init__(self) -> None:
+        self.payloads = []
+
+    def health(self) -> bool:
+        return True
+
+    def ableton_execute(self, payload: dict) -> dict:
+        self.payloads.append(payload)
+        return {"ok": True, "output": {"route": "api", "action": "set_parameter"}}
+
+
+def test_executor_routes_ableton_api_through_companion(tmp_path) -> None:
+    executor = Executor(tmp_path)
+    companion = AbletonCompanion()
+    executor.companion = companion
+
+    result = executor.execute(
+        {
+            "type": "api",
+            "api": "ableton_lom",
+            "action": "set_parameter",
+            "target": "track:1/device:Auto Filter",
+            "param": "Frequency",
+            "value": 0.73,
+        },
+        {},
+        {"id": "ableton-test", "name": "Ableton Test", "app": "Ableton Live"},
+    )
+
+    assert result["success"] is True
+    assert result["route_type"] == "api"
+    assert companion.payloads[0]["route"]["api"] == "ableton_lom"
+    assert companion.payloads[0]["workflow"]["app"] == "Ableton Live"
+

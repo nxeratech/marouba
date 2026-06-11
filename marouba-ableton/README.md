@@ -30,3 +30,13 @@ Current goal scope:
 - Keep the existing keyboard-as-MIDI code as a fallback only.
 
 Future bridge goals add the full LOM capture/replay endpoint set.
+
+## Probe reply pattern
+
+The Remote Script replies to the UDP source address that sent the OSC request.
+Barry's companion bridge still uses the stable pattern of binding its probe socket
+to `127.0.0.1:11001` before sending to `127.0.0.1:11000`, so replies continue
+to arrive on the documented response port. Ad-hoc test tools may also use a
+one-shot UDP socket: bind/listen on the same socket used to send the request and
+read the reply from that socket. Do not send from one socket and wait on a
+different unbound socket.
