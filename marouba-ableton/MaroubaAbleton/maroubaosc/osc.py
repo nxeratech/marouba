@@ -2,12 +2,20 @@ from __future__ import absolute_import, print_function
 
 import errno
 import logging
+import os
 import socket
 import struct
 
 
-OSC_LISTEN_PORT = 11000
-OSC_RESPONSE_PORT = 11001
+def _port_from_env(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+OSC_LISTEN_PORT = _port_from_env("MAROUBA_ABLETON_OSC_SEND_PORT", 11000)
+OSC_RESPONSE_PORT = _port_from_env("MAROUBA_ABLETON_OSC_RECV_PORT", 11001)
 
 logger = logging.getLogger("marouba-ableton")
 

@@ -142,6 +142,22 @@ button:disabled {
   color: #f87171;
 }
 
+.bridge-status {
+  color: #a7b4c8;
+  font-size: 11px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.bridge-status.ok {
+  color: #86efac;
+}
+
+.bridge-status.degraded,
+.bridge-status.unavailable {
+  color: #facc15;
+}
+
 .panel {
   background: #141924;
   border: 1px solid #232b3b;

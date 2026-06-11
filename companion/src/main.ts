@@ -17,6 +17,15 @@ type RecordingStatus = {
   active_window: { title: string; app_name: string };
   steps: RecordedEvent[];
   last_actions: string[];
+  ableton_bridge?: AbletonBridgeHealth;
+};
+
+type AbletonBridgeHealth = {
+  status: string;
+  message?: string;
+  send_port: number;
+  recv_port: number;
+  health_port: number;
 };
 
 type VaultWorkflow = {
@@ -49,6 +58,7 @@ const installAbletonCheckbox = document.querySelector<HTMLInputElement>("#instal
 const installAbletonButton = document.querySelector<HTMLButtonElement>("#install-ableton")!;
 const installAbletonCustomButton = document.querySelector<HTMLButtonElement>("#install-ableton-custom")!;
 const installAbletonStatus = document.querySelector<HTMLParagraphElement>("#install-ableton-status")!;
+const abletonBridgeStatus = document.querySelector<HTMLParagraphElement>("#ableton-bridge-status")!;
 let savedStatus: string | null = null;
 let reviewWasVisible = false;
 let apiToken: string | null = null;
@@ -328,6 +338,7 @@ function render(status: RecordingStatus) {
   const title = status.active_window.title || "Marouba";
   const appName = status.active_window.app_name || "";
   windowLabel.textContent = appName && appName !== "unknown" ? `${appName} - ${title}` : title;
+  renderAbletonBridgeStatus(status.ableton_bridge);
 
   actions.replaceChildren(
     ...status.last_actions.map((label) => {
@@ -361,6 +372,21 @@ function render(status: RecordingStatus) {
   }
   reviewWasVisible = reviewVisible;
   updateSaveState();
+}
+
+function renderAbletonBridgeStatus(health?: AbletonBridgeHealth) {
+  if (!health) {
+    abletonBridgeStatus.className = "bridge-status unavailable";
+    abletonBridgeStatus.textContent = "Ableton bridge: unavailable";
+    return;
+  }
+  abletonBridgeStatus.className = `bridge-status ${health.status}`;
+  const portInfo = `${health.send_port}/${health.recv_port}`;
+  if (health.status === "ok") {
+    abletonBridgeStatus.textContent = `Ableton bridge: live (${portInfo})`;
+  } else {
+    abletonBridgeStatus.textContent = `Ableton bridge: ${health.status} (${health.message ?? "no response"})`;
+  }
 }
 
 function updateSaveState() {

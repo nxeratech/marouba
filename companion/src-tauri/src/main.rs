@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod ableton;
+mod ableton_bridge;
 mod ableton_installer;
 mod classifier;
 mod paint;
@@ -9,6 +10,7 @@ mod route_switcher;
 mod vault;
 
 use ableton::*;
+use ableton_bridge::*;
 use ableton_installer::*;
 use paint::*;
 use vault::*;
@@ -20,7 +22,7 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
@@ -34,7 +36,7 @@ use windows::core::VARIANT;
 #[cfg(target_os = "windows")]
 use windows::core::{BSTR, PCWSTR};
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
@@ -64,9 +66,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextW, IsWindowVisible, SetCursorPos, SetForegroundWindow, ShowWindow, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOWNORMAL,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, SetCursorPos,
+    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 #[derive(Clone, Debug)]
@@ -76,6 +80,7 @@ struct AppState {
     last_actions: Vec<String>,
     started_polling: bool,
     active_window: WindowInfo,
+    ableton_bridge: Arc<Mutex<AbletonBridgeSupervisor>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +138,13 @@ struct RecordedEvent {
     key: Option<String>,
     note: Option<String>,
     velocity: Option<u8>,
+    midi_pitch: Option<u8>,
+    midi_channel: Option<u8>,
+    midi_start_beats: Option<f64>,
+    midi_duration_beats: Option<f64>,
+    midi_tempo: Option<f64>,
+    midi_source: Option<String>,
+    midi_note_id: Option<String>,
     window_title: Option<String>,
     app_name: Option<String>,
     window_rect: Option<WindowRect>,
@@ -143,6 +155,9 @@ struct RecordedEvent {
     parameter_value_raw: Option<String>,
     parameter_value_normalized: Option<f64>,
     parameter_value_capture_method: Option<String>,
+    api_target: Option<String>,
+    api_device: Option<String>,
+    api_param: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -163,6 +178,7 @@ struct RecordingStatus {
     active_window: WindowInfo,
     steps: Vec<RecordedEvent>,
     last_actions: Vec<String>,
+    ableton_bridge: AbletonBridgeHealth,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,14 +197,37 @@ struct OcrWord {
     height: i32,
 }
 
+#[derive(Clone, Debug)]
+struct KeyboardHookEvent {
+    kind: &'static str,
+    vk: i32,
+    timestamp_unix_ms: u128,
+}
+
+#[cfg(target_os = "windows")]
+static KEYBOARD_HOOK_SENDER: OnceLock<Mutex<Option<mpsc::Sender<KeyboardHookEvent>>>> =
+    OnceLock::new();
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--marouba-osc-bridge") {
+        if let Err(error) = run_ableton_osc_bridge() {
+            eprintln!("marouba osc bridge failed: {error}");
+        }
+        return;
+    }
+
+    start_keyboard_hook_thread();
     let token = load_or_create_token();
+    let ableton_bridge = Arc::new(Mutex::new(AbletonBridgeSupervisor::new(
+        AbletonBridgeConfig::from_env(),
+    )));
     let state = Arc::new(Mutex::new(AppState {
         recording: false,
         events: Vec::new(),
         last_actions: vec!["Companion started".to_string()],
         started_polling: false,
         active_window: active_window(),
+        ableton_bridge: ableton_bridge.clone(),
     }));
 
     let api_state = state.clone();
@@ -205,6 +244,7 @@ fn main() {
             open_vault,
             pick_workflows,
             install_ableton_remote_script_command,
+            ableton_bridge_health_command,
             companion_token
         ])
         .setup(|app| {
@@ -302,6 +342,13 @@ fn recording_status(state: tauri::State<Arc<Mutex<AppState>>>) -> RecordingStatu
 }
 
 #[tauri::command]
+fn ableton_bridge_health_command(state: tauri::State<Arc<Mutex<AppState>>>) -> AbletonBridgeHealth {
+    ableton_bridge_from_state(state.inner())
+        .and_then(|bridge| bridge.lock().ok().map(|mut guard| guard.health_check()))
+        .unwrap_or_else(|| AbletonBridgeHealth::unavailable("recording state unavailable"))
+}
+
+#[tauri::command]
 fn delete_step(
     index: usize,
     state: tauri::State<Arc<Mutex<AppState>>>,
@@ -321,6 +368,13 @@ fn delete_step(
 fn save_workflow(
     request: SaveWorkflowRequest,
     state: tauri::State<Arc<Mutex<AppState>>>,
+) -> Result<String, String> {
+    save_workflow_from_state(request, state.inner())
+}
+
+fn save_workflow_from_state(
+    request: SaveWorkflowRequest,
+    state: &Arc<Mutex<AppState>>,
 ) -> Result<String, String> {
     let guard = state
         .lock()
@@ -347,6 +401,7 @@ fn save_workflow(
     push_log(&mut guard, format!("Saved {}", path.display()));
     Ok(path.display().to_string())
 }
+
 #[tauri::command]
 fn open_vault() -> Result<(), String> {
     open_vault_folder()
@@ -440,6 +495,11 @@ fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
             active_window: guard.active_window.clone(),
             steps: guard.events.clone(),
             last_actions: guard.last_actions.clone(),
+            ableton_bridge: guard
+                .ableton_bridge
+                .lock()
+                .map(|mut bridge| bridge.health_check())
+                .unwrap_or_else(|_| AbletonBridgeHealth::unavailable("bridge state unavailable")),
         },
         Err(_) => RecordingStatus {
             mode: "offline".to_string(),
@@ -449,12 +509,86 @@ fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
             },
             steps: Vec::new(),
             last_actions: vec!["Recording state unavailable".to_string()],
+            ableton_bridge: AbletonBridgeHealth::unavailable("recording state unavailable"),
         },
     }
 }
 
+fn ableton_bridge_from_state(
+    state: &Arc<Mutex<AppState>>,
+) -> Option<Arc<Mutex<AbletonBridgeSupervisor>>> {
+    state.lock().ok().map(|guard| guard.ableton_bridge.clone())
+}
+
+fn start_keyboard_hook_thread() {
+    #[cfg(target_os = "windows")]
+    {
+        KEYBOARD_HOOK_SENDER.get_or_init(|| Mutex::new(None));
+        thread::spawn(|| unsafe {
+            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0);
+            if hook.is_err() {
+                eprintln!("Marouba keyboard hook failed: {:?}", hook.err());
+                return;
+            }
+            let hook = hook.unwrap();
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            let _ = windows::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
+        });
+    }
+}
+
+fn set_keyboard_hook_sender(sender: Option<mpsc::Sender<KeyboardHookEvent>>) {
+    #[cfg(target_os = "windows")]
+    {
+        let slot = KEYBOARD_HOOK_SENDER.get_or_init(|| Mutex::new(None));
+        if let Ok(mut guard) = slot.lock() {
+            *guard = sender;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = sender;
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn keyboard_hook_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        let kind = match wparam.0 as u32 {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some("keydown"),
+            WM_KEYUP | WM_SYSKEYUP => Some("keyup"),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let info = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+            let event = KeyboardHookEvent {
+                kind,
+                vk: info.vkCode as i32,
+                timestamp_unix_ms: current_unix_ms(),
+            };
+            if let Some(slot) = KEYBOARD_HOOK_SENDER.get() {
+                if let Ok(guard) = slot.lock() {
+                    if let Some(sender) = guard.as_ref() {
+                        let _ = sender.send(event);
+                    }
+                }
+            }
+        }
+    }
+    CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam)
+}
+
 fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let started = Instant::now();
+    let started_unix_ms = current_unix_ms();
     let mut last_pos: Option<(i32, i32)> = None;
     let mut last_left = false;
     let mut last_right = false;
@@ -464,6 +598,10 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let mut last_mousemove_pos: Option<(i32, i32)> = None;
     let mut ableton_text_entry_until_ms = 0u128;
     let mut active_ableton_midi_keys = HashSet::<i32>::new();
+    let mut ableton_bridge_repair_logged = false;
+    let mut last_ableton_bridge_check = Instant::now() - Duration::from_secs(5);
+    let mut ableton_parameter_drag_active = false;
+    let mut keyboard_hook_rx: Option<mpsc::Receiver<KeyboardHookEvent>> = None;
 
     loop {
         let recording = state.lock().map(|guard| guard.recording).unwrap_or(false);
@@ -473,8 +611,58 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
         }
 
         if !recording {
+            ableton_bridge_repair_logged = false;
+            keyboard_hook_rx = None;
+            set_keyboard_hook_sender(None);
             thread::sleep(Duration::from_millis(120));
             continue;
+        }
+
+        if keyboard_hook_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            set_keyboard_hook_sender(Some(tx));
+            keyboard_hook_rx = Some(rx);
+        }
+
+        if title_is_ableton(&window.title)
+            && last_ableton_bridge_check.elapsed() >= Duration::from_secs(2)
+        {
+            last_ableton_bridge_check = Instant::now();
+            let health = ableton_bridge_from_state(&state)
+                .and_then(|bridge| bridge.lock().ok().map(|mut guard| guard.health_check()))
+                .unwrap_or_else(|| AbletonBridgeHealth::unavailable("bridge state unavailable"));
+            maybe_log_ableton_bridge_repair(
+                &state,
+                &window,
+                &current_app_name,
+                started.elapsed().as_millis(),
+                health,
+                &mut ableton_bridge_repair_logged,
+            );
+        } else if !title_is_ableton(&window.title) {
+            ableton_bridge_repair_logged = false;
+        }
+
+        if title_is_ableton(&window.title) {
+            drain_ableton_midi_events(
+                &state,
+                &window,
+                &current_app_name,
+                started.elapsed().as_millis(),
+                started_unix_ms,
+            );
+        }
+
+        if let Some(rx) = keyboard_hook_rx.as_ref() {
+            drain_keyboard_hook_events(
+                &state,
+                rx,
+                &window,
+                &current_app_name,
+                started.elapsed().as_millis(),
+                started_unix_ms,
+                title_is_ableton(&window.title),
+            );
         }
 
         if window.title != last_title {
@@ -494,6 +682,13 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     key: None,
                     note: None,
                     velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
                     window_title: Some(window.title.clone()),
                     app_name: Some(current_app_name.clone()),
                     window_rect: active_window_rect(),
@@ -504,6 +699,9 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     parameter_value_raw: None,
                     parameter_value_normalized: None,
                     parameter_value_capture_method: None,
+                    api_target: None,
+                    api_device: None,
+                    api_param: None,
                 },
             );
         } else if current_app_name.is_empty() || current_app_name == "unknown" {
@@ -539,7 +737,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
             if left != last_left {
                 last_left = left;
                 let timestamp_ms = started.elapsed().as_millis();
-                let event = mouse_event_record(
+                let mut event = mouse_event_record(
                     if left { "mousedown" } else { "mouseup" },
                     x,
                     y,
@@ -548,6 +746,13 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     &window,
                     &current_app_name,
                 );
+                if left && title_is_ableton(&window.title) {
+                    ableton_parameter_drag_active = is_parameter_event_candidate(&event);
+                }
+                if !left && title_is_ableton(&window.title) && ableton_parameter_drag_active {
+                    enrich_ableton_api_parameter_value(&state, &mut event);
+                    ableton_parameter_drag_active = false;
+                }
                 if title_is_ableton(&window.title) && event.kind == "mousedown" {
                     if event.element_name.as_deref() == Some("Search") {
                         ableton_text_entry_until_ms = timestamp_ms + 6_000;
@@ -579,49 +784,53 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
             }
         }
 
-        let mut current_keys = HashSet::new();
-        for vk in 8..=254 {
-            if key_is_down(vk) {
-                current_keys.insert(vk);
-                if !last_keys.contains(&vk) {
-                    let timestamp_ms = started.elapsed().as_millis();
-                    let capture_as_midi_note = title_is_ableton(&window.title)
-                        && timestamp_ms > ableton_text_entry_until_ms
-                        && ableton_computer_midi_note_for_vk(vk).is_some();
-                    if capture_as_midi_note {
-                        active_ableton_midi_keys.insert(vk);
+        if !title_is_ableton(&window.title) {
+            let mut current_keys = HashSet::new();
+            for vk in 8..=254 {
+                if key_is_down(vk) {
+                    current_keys.insert(vk);
+                    if !last_keys.contains(&vk) {
+                        let timestamp_ms = started.elapsed().as_millis();
+                        push_event(
+                            &state,
+                            keyboard_event_record(
+                                "keydown",
+                                vk,
+                                timestamp_ms,
+                                &window,
+                                &current_app_name,
+                                false,
+                            ),
+                        );
                     }
-                    push_event(
-                        &state,
-                        keyboard_event_record(
-                            "keydown",
-                            vk,
-                            timestamp_ms,
-                            &window,
-                            &current_app_name,
-                            capture_as_midi_note,
-                        ),
-                    );
                 }
             }
+            for vk in last_keys.difference(&current_keys) {
+                let timestamp_ms = started.elapsed().as_millis();
+                push_event(
+                    &state,
+                    keyboard_event_record(
+                        "keyup",
+                        *vk,
+                        timestamp_ms,
+                        &window,
+                        &current_app_name,
+                        false,
+                    ),
+                );
+            }
+            last_keys = current_keys;
+        } else {
+            active_ableton_midi_keys.clear();
+            last_keys.clear();
         }
-        for vk in last_keys.difference(&current_keys) {
-            let timestamp_ms = started.elapsed().as_millis();
-            let capture_as_midi_note = active_ableton_midi_keys.remove(vk);
-            push_event(
-                &state,
-                keyboard_event_record(
-                    "keyup",
-                    *vk,
-                    timestamp_ms,
-                    &window,
-                    &current_app_name,
-                    capture_as_midi_note,
-                ),
-            );
-        }
-        last_keys = current_keys;
-        let poll_interval_ms = if last_left { 10 } else { 45 };
+        let poll_interval_ms = if title_is_ableton(&window.title) {
+            5
+        } else if last_left {
+            10
+        } else {
+            45
+        };
         thread::sleep(Duration::from_millis(poll_interval_ms));
     }
 }
@@ -637,6 +846,38 @@ fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
         guard.events.push(event);
         push_log(&mut guard, label);
     }
+}
+
+fn maybe_log_ableton_bridge_repair(
+    state: &Arc<Mutex<AppState>>,
+    window: &WindowInfo,
+    current_app_name: &str,
+    timestamp_ms: u128,
+    health: AbletonBridgeHealth,
+    repair_logged: &mut bool,
+) {
+    if health.status == "ok" {
+        *repair_logged = false;
+        return;
+    }
+    if *repair_logged {
+        return;
+    }
+    push_event(
+        state,
+        repair_event_record(
+            timestamp_ms,
+            window,
+            current_app_name,
+            format!(
+                "Ableton OSC bridge unavailable: {}; degrading capture to r3 gesture",
+                health
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ),
+        ),
+    );
+    *repair_logged = true;
 }
 
 fn is_empty_unknown_system_event(event: &RecordedEvent) -> bool {
@@ -695,7 +936,187 @@ fn event_label(event: &RecordedEvent) -> String {
             "Focus {}",
             event.window_title.as_deref().unwrap_or("unknown")
         ),
+        "repair" => format!(
+            "Repair: {}",
+            event.semantic.as_deref().unwrap_or("degraded capture")
+        ),
         _ => event.kind.clone(),
+    }
+}
+
+fn repair_event_record(
+    timestamp_ms: u128,
+    window: &WindowInfo,
+    current_app_name: &str,
+    reason: String,
+) -> RecordedEvent {
+    let app_name = if current_app_name.trim().is_empty()
+        || current_app_name.trim().eq_ignore_ascii_case("unknown")
+    {
+        app_name_from_title(&window.title)
+    } else {
+        current_app_name.to_string()
+    };
+    RecordedEvent {
+        kind: "repair".to_string(),
+        event_type: Some("repair".to_string()),
+        timestamp_ms,
+        x: None,
+        y: None,
+        normalized_x: None,
+        normalized_y: None,
+        button: None,
+        key: None,
+        note: None,
+        velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
+        window_title: Some(window.title.clone()),
+        app_name: Some(app_name),
+        window_rect: active_window_rect(),
+        element_name: None,
+        element_role: None,
+        colour_hex: None,
+        semantic: Some(reason),
+        parameter_value_raw: None,
+        parameter_value_normalized: None,
+        parameter_value_capture_method: None,
+        api_target: None,
+        api_device: None,
+        api_param: None,
+    }
+}
+
+fn enrich_ableton_api_parameter_value(state: &Arc<Mutex<AppState>>, event: &mut RecordedEvent) {
+    let snapshot = ableton_bridge_from_state(state).and_then(|bridge| {
+        bridge
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.selected_parameter_snapshot().ok())
+    });
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    event.parameter_value_raw = Some(snapshot.display_value.clone());
+    event.parameter_value_normalized = Some(snapshot.normalized_value);
+    event.parameter_value_capture_method = Some("ableton_lom".to_string());
+    event.api_target = Some(snapshot.target);
+    event.api_device = Some(snapshot.device);
+    event.api_param = Some(snapshot.parameter);
+}
+
+fn drain_ableton_midi_events(
+    state: &Arc<Mutex<AppState>>,
+    window: &WindowInfo,
+    current_app_name: &str,
+    fallback_timestamp_ms: u128,
+    recording_started_unix_ms: u128,
+) {
+    let events = ableton_bridge_from_state(state).and_then(|bridge| {
+        bridge
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.drain_midi_events().ok())
+    });
+    let Some(events) = events else {
+        return;
+    };
+    for event in events {
+        let timestamp_ms = if event.source.as_deref() == Some("lom_clip_notes") {
+            event.timestamp_ms
+        } else {
+            event
+                .timestamp_ms
+                .checked_sub(recording_started_unix_ms)
+                .unwrap_or(fallback_timestamp_ms)
+        };
+        push_event(
+            state,
+            midi_event_record(event, timestamp_ms, window, current_app_name),
+        );
+    }
+}
+
+fn drain_keyboard_hook_events(
+    state: &Arc<Mutex<AppState>>,
+    rx: &mpsc::Receiver<KeyboardHookEvent>,
+    window: &WindowInfo,
+    current_app_name: &str,
+    fallback_timestamp_ms: u128,
+    recording_started_unix_ms: u128,
+    ableton_focused: bool,
+) {
+    while let Ok(event) = rx.try_recv() {
+        let timestamp_ms = event
+            .timestamp_unix_ms
+            .checked_sub(recording_started_unix_ms)
+            .unwrap_or(fallback_timestamp_ms);
+        let mut recorded = keyboard_event_record(
+            event.kind,
+            event.vk,
+            timestamp_ms,
+            window,
+            current_app_name,
+            false,
+        );
+        if ableton_focused {
+            add_semantic_tag(&mut recorded, "low_trust_keyboard_activity");
+        }
+        push_event(state, recorded);
+    }
+}
+
+fn midi_event_record(
+    event: AbletonMidiEvent,
+    timestamp_ms: u128,
+    window: &WindowInfo,
+    current_app_name: &str,
+) -> RecordedEvent {
+    let app_name = if current_app_name.trim().is_empty()
+        || current_app_name.trim().eq_ignore_ascii_case("unknown")
+    {
+        app_name_from_title(&window.title)
+    } else {
+        current_app_name.to_string()
+    };
+    let note = midi_note_name_from_pitch(event.pitch);
+    RecordedEvent {
+        kind: event.kind.clone(),
+        event_type: Some(event.kind),
+        timestamp_ms,
+        x: None,
+        y: None,
+        normalized_x: None,
+        normalized_y: None,
+        button: None,
+        key: None,
+        note: Some(note.clone()),
+        velocity: Some(event.velocity),
+        midi_pitch: Some(event.pitch),
+        midi_channel: Some(event.channel),
+        midi_start_beats: event.start_time.as_deref().and_then(|value| value.parse::<f64>().ok()),
+        midi_duration_beats: event.duration.as_deref().and_then(|value| value.parse::<f64>().ok()),
+        midi_tempo: event.tempo.as_deref().and_then(|value| value.parse::<f64>().ok()),
+        midi_source: event.source.clone().or_else(|| Some("lom_clip_notes".to_string())),
+        midi_note_id: event.note_id.clone(),
+        window_title: Some(window.title.clone()),
+        app_name: Some(app_name),
+        window_rect: active_window_rect(),
+        element_name: None,
+        element_role: None,
+        colour_hex: None,
+        semantic: Some(format!("midi_note:{note};midi_pitch:{}", event.pitch)),
+        parameter_value_raw: None,
+        parameter_value_normalized: None,
+        parameter_value_capture_method: None,
+        api_target: Some("ableton:midi_input".to_string()),
+        api_device: Some("midi".to_string()),
+        api_param: Some("note".to_string()),
     }
 }
 
@@ -735,6 +1156,13 @@ fn mouse_event_record(
         key: None,
         note: None,
         velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
         window_title: Some(window.title.clone()),
         app_name: Some(app_name),
         window_rect: rect,
@@ -745,6 +1173,9 @@ fn mouse_event_record(
         parameter_value_raw: None,
         parameter_value_normalized: None,
         parameter_value_capture_method: None,
+        api_target: None,
+        api_device: None,
+        api_param: None,
     };
     if kind == "mousedown" || (kind == "mouseup" && title_is_ableton(&window.title)) {
         if let Ok((element, _)) = find_uia_element(&UiaRequest {
@@ -930,6 +1361,13 @@ fn keyboard_event_record(
         key: Some(key_label),
         note: midi_note.clone(),
         velocity: midi_note.as_ref().map(|_| 100),
+        midi_pitch: midi_note.as_ref().and_then(|note| midi_pitch_from_note_name(note)),
+        midi_channel: midi_note.as_ref().map(|_| 1),
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: midi_note.as_ref().map(|_| "keyboard_activity_low_trust".to_string()),
+        midi_note_id: None,
         window_title: Some(window.title.clone()),
         app_name: Some(app_name),
         window_rect: active_window_rect(),
@@ -940,6 +1378,9 @@ fn keyboard_event_record(
         parameter_value_raw: None,
         parameter_value_normalized: None,
         parameter_value_capture_method: None,
+        api_target: None,
+        api_device: None,
+        api_param: None,
     }
 }
 
@@ -948,6 +1389,47 @@ fn key_label_for_vk(vk: i32) -> Option<String> {
     let ch = char::from_u32(vk)?;
     ch.is_ascii_alphanumeric()
         .then(|| ch.to_ascii_lowercase().to_string())
+}
+
+fn current_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn midi_note_name_from_pitch(pitch: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    let octave = (pitch / 12) as i16 - 2;
+    format!("{}{}", NAMES[(pitch % 12) as usize], octave)
+}
+
+fn midi_pitch_from_note_name(note: &str) -> Option<u8> {
+    let note = note.trim();
+    let split_at = note
+        .char_indices()
+        .find_map(|(index, ch)| (ch.is_ascii_digit() || ch == '-').then_some(index))?;
+    let (name, octave) = note.split_at(split_at);
+    let semitone = match name.to_ascii_uppercase().as_str() {
+        "C" => 0,
+        "C#" | "DB" => 1,
+        "D" => 2,
+        "D#" | "EB" => 3,
+        "E" => 4,
+        "F" => 5,
+        "F#" | "GB" => 6,
+        "G" => 7,
+        "G#" | "AB" => 8,
+        "A" => 9,
+        "A#" | "BB" => 10,
+        "B" => 11,
+        _ => return None,
+    };
+    let octave = octave.parse::<i16>().ok()?;
+    let pitch = (octave + 2) * 12 + semitone;
+    (0..=127).contains(&pitch).then_some(pitch as u8)
 }
 
 fn ableton_computer_midi_note_for_vk(vk: i32) -> Option<String> {
@@ -1002,6 +1484,56 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
         let url = request.url().to_string();
         let response = match (method, url.as_str()) {
             (Method::Get, "/health") => json_response(json!({"status": "ok"}), 200),
+            (Method::Get, "/ableton/health") => {
+                let health = ableton_bridge_from_state(&state)
+                    .and_then(|bridge| bridge.lock().ok().map(|mut guard| guard.health_check()))
+                    .unwrap_or_else(|| {
+                        AbletonBridgeHealth::unavailable("recording state unavailable")
+                    });
+                json_response(json!(health), 200)
+            }
+            (Method::Get, "/ableton/transport") => {
+                let result = ableton_bridge_from_state(&state)
+                    .and_then(|bridge| {
+                        bridge
+                            .lock()
+                            .ok()
+                            .and_then(|mut guard| guard.transport_snapshot().ok())
+                    })
+                    .map(|snapshot| json!(snapshot))
+                    .unwrap_or_else(|| {
+                        json!({"status": "degraded", "message": "Ableton transport unavailable"})
+                });
+                json_response(result, 200)
+            }
+            (Method::Get, "/ableton/parameter") => {
+                let result = ableton_bridge_from_state(&state)
+                    .and_then(|bridge| {
+                        bridge
+                            .lock()
+                            .ok()
+                            .and_then(|mut guard| guard.selected_parameter_snapshot().ok())
+                    })
+                    .map(|snapshot| json!(snapshot))
+                    .unwrap_or_else(|| {
+                        json!({"status": "degraded", "message": "Ableton selected parameter unavailable"})
+                    });
+                json_response(result, 200)
+            }
+            (Method::Get, "/ableton/midi") => {
+                let result = ableton_bridge_from_state(&state)
+                    .and_then(|bridge| {
+                        bridge
+                            .lock()
+                            .ok()
+                            .and_then(|mut guard| guard.drain_midi_events().ok())
+                    })
+                    .map(|events| json!({"status": "ok", "events": events}))
+                    .unwrap_or_else(|| {
+                        json!({"status": "degraded", "message": "Ableton MIDI drain unavailable"})
+                    });
+                json_response(result, 200)
+            }
             (Method::Get, "/window") => json_response(json!(active_window()), 200),
             (Method::Get, "/workflows") => {
                 let (body, status) = list_saved_workflows();
@@ -1015,6 +1547,13 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
             (Method::Post, "/record/stop") => {
                 let _ = stop_recording_from_state(state.clone());
                 json_response(json!(status_from_state(&state)), 200)
+            }
+            (Method::Post, "/workflow/save-recording") => {
+                let payload: SaveWorkflowRequest = read_json(&mut request);
+                match save_workflow_from_state(payload, &state) {
+                    Ok(path) => json_response(json!({"status": "saved", "path": path}), 200),
+                    Err(error) => json_response(json!({"status": "failed", "error": error}), 400),
+                }
             }
             (Method::Post, "/uia/find") => {
                 let payload: UiaRequest = read_json(&mut request);
@@ -2584,6 +3123,19 @@ fn is_parameter_event_candidate(event: &RecordedEvent) -> bool {
             .as_deref()
             .map(parameter_name_looks_adjustable)
             .unwrap_or(false)
+        || event
+            .semantic
+            .as_deref()
+            .map(|semantic| {
+                semantic
+                    .split(';')
+                    .any(|tag| tag.trim().starts_with("automation_parameter:"))
+            })
+            .unwrap_or(false)
+        || event
+            .api_param
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn parameter_name_looks_adjustable(name: &str) -> bool {
@@ -4825,11 +5377,27 @@ fn compile_v2_steps(events: &[RecordedEvent]) -> Vec<Value> {
     let mut index = 0usize;
 
     while index < events.len() {
+        if is_midi_note_on_event(&events[index]) {
+            if let Some(off_index) = matching_midi_note_off_index(events, index) {
+                flush_gesture_step(&mut steps, &mut gesture_buffer);
+                steps.push(midi_note_step_value(
+                    steps.len() + 1,
+                    &events[index],
+                    &events[off_index],
+                ));
+                index = off_index + 1;
+                continue;
+            }
+        }
         if events[index].kind == "mousedown" && is_parameter_event_candidate(&events[index]) {
             if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
                 let segment = events[index..=up_index].to_vec();
                 let moved = segment.iter().any(|event| event.kind == "mousemove");
-                if moved {
+                let has_captured_value = segment
+                    .last()
+                    .and_then(|event| event.parameter_value_capture_method.as_deref())
+                    == Some("ableton_lom");
+                if moved || has_captured_value {
                     flush_gesture_step(&mut steps, &mut gesture_buffer);
                     steps.push(parameter_step_value(steps.len() + 1, &segment));
                     index = up_index + 1;
@@ -4856,6 +5424,37 @@ fn matching_mouseup_index_for_recorded(events: &[RecordedEvent], start: usize) -
         })
 }
 
+fn matching_midi_note_off_index(events: &[RecordedEvent], start: usize) -> Option<usize> {
+    let pitch = midi_event_pitch(&events[start])?;
+    let channel = events[start].midi_channel.unwrap_or(1);
+    events
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(index, event)| {
+            (is_midi_note_off_event(event)
+                && midi_event_pitch(event) == Some(pitch)
+                && event.midi_channel.unwrap_or(1) == channel)
+                .then_some(index)
+        })
+}
+
+fn is_midi_note_on_event(event: &RecordedEvent) -> bool {
+    matches!(event.kind.as_str(), "note_on")
+        || matches!(event.event_type.as_deref(), Some("note_on"))
+}
+
+fn is_midi_note_off_event(event: &RecordedEvent) -> bool {
+    matches!(event.kind.as_str(), "note_off")
+        || matches!(event.event_type.as_deref(), Some("note_off"))
+}
+
+fn midi_event_pitch(event: &RecordedEvent) -> Option<u8> {
+    event
+        .midi_pitch
+        .or_else(|| event.note.as_deref().and_then(midi_pitch_from_note_name))
+}
+
 fn flush_gesture_step(steps: &mut Vec<Value>, gesture_buffer: &mut Vec<RecordedEvent>) {
     if gesture_buffer.is_empty() {
         return;
@@ -4874,6 +5473,85 @@ fn flush_gesture_step(steps: &mut Vec<Value>, gesture_buffer: &mut Vec<RecordedE
             }
         ]
     }));
+}
+
+fn midi_note_step_value(step_number: usize, on: &RecordedEvent, off: &RecordedEvent) -> Value {
+    let pitch = midi_event_pitch(on).unwrap_or(0);
+    let note = on
+        .note
+        .clone()
+        .unwrap_or_else(|| midi_note_name_from_pitch(pitch));
+    let velocity = on.velocity.unwrap_or(100);
+    let channel = on.midi_channel.unwrap_or(1);
+    let duration_ms = off.timestamp_ms.saturating_sub(on.timestamp_ms);
+    let app = on
+        .app_name
+        .clone()
+        .or_else(|| off.app_name.clone())
+        .unwrap_or_else(|| "Ableton Live".to_string());
+    let window_title = on
+        .window_title
+        .clone()
+        .or_else(|| off.window_title.clone())
+        .unwrap_or_default();
+    let capture_method = if on.api_param.as_deref() == Some("note")
+        && on.midi_source.as_deref() == Some("lom_clip_notes")
+    {
+        "ableton_midi"
+    } else {
+        "keyboard_activity_low_trust"
+    };
+    let start_beats = on.midi_start_beats.unwrap_or(0.0);
+    let duration_beats = on.midi_duration_beats.unwrap_or(0.0);
+    let tempo = on.midi_tempo.unwrap_or(120.0);
+    let note_id = on.midi_note_id.clone().unwrap_or_default();
+
+    json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "play_midi_note",
+        "intent": format!("Play MIDI note {note}."),
+        "target": {
+            "app": app,
+            "window_title": window_title,
+            "channel": channel
+        },
+        "value": {
+            "note": note,
+            "pitch": pitch,
+            "velocity": velocity,
+            "duration_ms": duration_ms,
+            "start_time": start_beats,
+            "duration": duration_beats,
+            "tempo": tempo,
+            "note_id": note_id,
+            "started_at_ms": on.timestamp_ms,
+            "ended_at_ms": off.timestamp_ms,
+            "capture_method": capture_method
+        },
+        "signals": default_step_signals(),
+        "routes": [
+            {
+                "type": "api",
+                "api": "ableton_midi",
+                "target": "ableton:midi_input",
+                "action": "play_note",
+                "note": note,
+                "pitch": pitch,
+                "velocity": velocity,
+                "channel": channel,
+                "duration_ms": duration_ms,
+                "start_time": start_beats,
+                "duration": duration_beats,
+                "tempo": tempo,
+                "note_id": note_id,
+                "events": [on, off]
+            },
+            {
+                "type": "shortcut",
+                "events": [on, off]
+            }
+        ]
+    })
 }
 
 fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value {
@@ -4901,6 +5579,29 @@ fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value 
         .and_then(|event| event.parameter_value_capture_method.clone())
         .unwrap_or_else(|| "unavailable".to_string());
 
+    let mut routes = Vec::new();
+    if capture_method == "ableton_lom" {
+        routes.push(json!({
+            "type": "api",
+            "api": "ableton_lom",
+            "target": up.and_then(|event| event.api_target.clone()).unwrap_or_default(),
+            "device": up.and_then(|event| event.api_device.clone()).unwrap_or_default(),
+            "param": up.and_then(|event| event.api_param.clone()).unwrap_or_else(|| element_name.clone()),
+            "value": normalized,
+            "display_value": raw
+        }));
+    }
+    routes.push(json!({
+        "type": "uia",
+        "element_name": element_name.clone(),
+        "action": "set_value",
+        "value": normalized
+    }));
+    routes.push(json!({
+        "type": "gesture",
+        "events": segment
+    }));
+
     json!({
         "id": format!("step_{step_number:03}"),
         "type": "set_parameter",
@@ -4917,18 +5618,7 @@ fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value 
             "capture_method": capture_method
         },
         "signals": default_step_signals(),
-        "routes": [
-            {
-                "type": "uia",
-                "element_name": element_name,
-                "action": "set_value",
-                "value": normalized
-            },
-            {
-                "type": "gesture",
-                "events": segment
-            }
-        ]
+        "routes": routes
     })
 }
 
@@ -5073,6 +5763,72 @@ fn ableton_legacy_octave_correction_px(rect: Option<&WindowRect>) -> i32 {
 mod tests {
     use super::*;
 
+    fn test_app_state(recording: bool) -> Arc<Mutex<AppState>> {
+        Arc::new(Mutex::new(AppState {
+            recording,
+            events: Vec::new(),
+            last_actions: Vec::new(),
+            started_polling: true,
+            active_window: WindowInfo {
+                title: "Untitled - Ableton Live 12 Suite".to_string(),
+                app_name: "Ableton Live".to_string(),
+            },
+            ableton_bridge: Arc::new(Mutex::new(AbletonBridgeSupervisor::new(
+                AbletonBridgeConfig {
+                    host: "127.0.0.1".to_string(),
+                    send_port: 12000,
+                    recv_port: 12001,
+                    health_port: 12002,
+                },
+            ))),
+        }))
+    }
+
+    #[test]
+    fn degraded_ableton_bridge_logs_one_repair_and_keeps_recording() {
+        let state = test_app_state(true);
+        let window = WindowInfo {
+            title: "Untitled - Ableton Live 12 Suite".to_string(),
+            app_name: "Ableton Live".to_string(),
+        };
+        let health = AbletonBridgeHealth {
+            status: "degraded".to_string(),
+            message: Some("bridge died".to_string()),
+            send_port: 12000,
+            recv_port: 12001,
+            health_port: 12002,
+        };
+        let mut repair_logged = false;
+
+        maybe_log_ableton_bridge_repair(
+            &state,
+            &window,
+            "Ableton Live",
+            42,
+            health.clone(),
+            &mut repair_logged,
+        );
+        maybe_log_ableton_bridge_repair(
+            &state,
+            &window,
+            "Ableton Live",
+            84,
+            health,
+            &mut repair_logged,
+        );
+
+        let guard = state.lock().expect("state");
+        assert!(guard.recording);
+        assert_eq!(guard.events.len(), 1);
+        assert_eq!(guard.events[0].kind, "repair");
+        assert_eq!(guard.events[0].event_type.as_deref(), Some("repair"));
+        assert!(guard.events[0]
+            .semantic
+            .as_deref()
+            .unwrap_or("")
+            .contains("degrading capture to r3 gesture"));
+    }
+
     #[test]
     fn ocr_match_point_uses_phrase_bounds_for_multi_word_preset() {
         let words = vec![
@@ -5155,6 +5911,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
             window_title: Some("Untitled - Ableton Live 12 Suite".to_string()),
             app_name: Some("Ableton Live".to_string()),
             window_rect: None,
@@ -5165,6 +5928,9 @@ mod tests {
             parameter_value_raw: None,
             parameter_value_normalized: None,
             parameter_value_capture_method: None,
+            api_target: None,
+            api_device: None,
+            api_param: None,
         };
 
         add_semantic_tag(&mut event, "midi_note:Crash");
@@ -5174,6 +5940,253 @@ mod tests {
             event.semantic.as_deref(),
             Some("channel:Drums;midi_note:Crash")
         );
+    }
+
+    #[test]
+    fn ableton_parameter_step_carries_api_and_gesture_routes_together() {
+        let mut down = ableton_test_event("A-Reverb", Some("automation_parameter:A-Reverb"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.x = Some(420);
+        down.y = Some(760);
+        let mut move_event = down.clone();
+        move_event.kind = "mousemove".to_string();
+        move_event.timestamp_ms = 1_025;
+        move_event.x = Some(426);
+        move_event.y = Some(748);
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_045;
+        up.x = Some(430);
+        up.y = Some(740);
+        up.parameter_value_raw = Some("-8.4 dB".to_string());
+        up.parameter_value_normalized = Some(0.73);
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_target = Some("track:Drums/device:Echo/parameter:A-Reverb".to_string());
+        up.api_device = Some("Echo".to_string());
+        up.api_param = Some("A-Reverb".to_string());
+
+        let step = parameter_step_value(1, &[down, move_event, up]);
+        let routes = step
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+
+        assert_eq!(
+            step.get("type").and_then(Value::as_str),
+            Some("set_parameter")
+        );
+        assert_eq!(routes.len(), 3);
+        assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(
+            routes[0].get("api").and_then(Value::as_str),
+            Some("ableton_lom")
+        );
+        assert_eq!(routes[0].get("value").and_then(Value::as_f64), Some(0.73));
+        assert_eq!(
+            routes[0].get("display_value").and_then(Value::as_str),
+            Some("-8.4 dB")
+        );
+        assert_eq!(routes[1].get("type").and_then(Value::as_str), Some("uia"));
+        assert_eq!(
+            routes[2].get("type").and_then(Value::as_str),
+            Some("gesture")
+        );
+        assert_eq!(
+            routes[2]
+                .get("events")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn five_ableton_parameter_drags_compile_to_five_dual_route_steps() {
+        let mut events = Vec::new();
+        for index in 0..5 {
+            let timestamp = 1_000 + (index as u128 * 200);
+            let name = format!("Macro {}", index + 1);
+            let mut down = ableton_test_event(&name, Some("automation_parameter:Macro"));
+            down.kind = "mousedown".to_string();
+            down.timestamp_ms = timestamp;
+            down.x = Some(400 + index as i32);
+            down.y = Some(700);
+            let mut move_event = down.clone();
+            move_event.kind = "mousemove".to_string();
+            move_event.timestamp_ms = timestamp + 25;
+            move_event.y = Some(690 - index as i32);
+            let mut up = down.clone();
+            up.kind = "mouseup".to_string();
+            up.timestamp_ms = timestamp + 45;
+            up.y = Some(688 - index as i32);
+            up.parameter_value_raw = Some(format!("{}%", 10 + index));
+            up.parameter_value_normalized = Some(0.1 + (index as f64 * 0.1));
+            up.parameter_value_capture_method = Some("ableton_lom".to_string());
+            up.api_target = Some(format!("track:Drums/device:Rack/parameter:{name}"));
+            up.api_device = Some("Rack".to_string());
+            up.api_param = Some(name);
+            events.extend([down, move_event, up]);
+        }
+
+        let steps = compile_v2_steps(&events);
+
+        assert_eq!(steps.len(), 5);
+        for (index, step) in steps.iter().enumerate() {
+            assert_eq!(
+                step.get("type").and_then(Value::as_str),
+                Some("set_parameter")
+            );
+            let routes = step
+                .get("routes")
+                .and_then(Value::as_array)
+                .expect("routes");
+            assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+            assert_eq!(routes[1].get("type").and_then(Value::as_str), Some("uia"));
+            assert_eq!(
+                routes[2].get("type").and_then(Value::as_str),
+                Some("gesture")
+            );
+            let gesture_events = routes[2]
+                .get("events")
+                .and_then(Value::as_array)
+                .expect("gesture events");
+            let down_ts = gesture_events[0]
+                .get("timestamp_ms")
+                .and_then(Value::as_u64)
+                .expect("down timestamp");
+            let up_ts = gesture_events[2]
+                .get("timestamp_ms")
+                .and_then(Value::as_u64)
+                .expect("up timestamp");
+            assert_eq!(up_ts - down_ts, 45, "step {} timing drifted", index + 1);
+        }
+    }
+
+    #[test]
+    fn ableton_lom_value_without_mousemove_still_compiles_to_parameter_step() {
+        let mut down = ableton_test_event("B-Delay", Some("automation_parameter:B-Delay"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 2_000;
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 2_045;
+        up.parameter_value_raw = Some("0.0 dB".to_string());
+        up.parameter_value_normalized = Some(1.0);
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_target = Some("track:Drums/device:Chicago Kit/parameter:B-Delay".to_string());
+        up.api_device = Some("Chicago Kit".to_string());
+        up.api_param = Some("B-Delay".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("set_parameter")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(
+            routes[2].get("type").and_then(Value::as_str),
+            Some("gesture")
+        );
+    }
+
+    #[test]
+    fn eight_midi_notes_compile_to_api_route_steps_with_timing() {
+        let mut events = Vec::new();
+        for index in 0..8u8 {
+            let pitch = 60 + index;
+            let start = 1_000 + (index as u128 * 137);
+            events.push(midi_test_event("note_on", pitch, 40 + index, start));
+            events.push(midi_test_event("note_off", pitch, 0, start + 72));
+        }
+
+        let steps = compile_v2_steps(&events);
+
+        assert_eq!(steps.len(), 8);
+        for (index, step) in steps.iter().enumerate() {
+            assert_eq!(
+                step.get("type").and_then(Value::as_str),
+                Some("play_midi_note")
+            );
+            let value = step.get("value").expect("value");
+            assert_eq!(
+                value.get("pitch").and_then(Value::as_u64),
+                Some(60 + index as u64)
+            );
+            assert_eq!(
+                value.get("velocity").and_then(Value::as_u64),
+                Some(40 + index as u64)
+            );
+            assert_eq!(value.get("duration_ms").and_then(Value::as_u64), Some(72));
+            let routes = step
+                .get("routes")
+                .and_then(Value::as_array)
+                .expect("routes");
+            assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+            assert_eq!(
+                routes[0].get("api").and_then(Value::as_str),
+                Some("ableton_midi")
+            );
+            assert_eq!(
+                routes[0].get("pitch").and_then(Value::as_u64),
+                Some(60 + index as u64)
+            );
+            assert_eq!(
+                routes[0].get("velocity").and_then(Value::as_u64),
+                Some(40 + index as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn midi_note_name_and_pitch_round_trip() {
+        assert_eq!(midi_note_name_from_pitch(60), "C3");
+        assert_eq!(midi_pitch_from_note_name("C3"), Some(60));
+        assert_eq!(midi_pitch_from_note_name("C#3"), Some(61));
+        assert_eq!(midi_pitch_from_note_name("Db3"), Some(61));
+    }
+
+    fn midi_test_event(kind: &str, pitch: u8, velocity: u8, timestamp_ms: u128) -> RecordedEvent {
+        let note = midi_note_name_from_pitch(pitch);
+        RecordedEvent {
+            kind: kind.to_string(),
+            event_type: Some(kind.to_string()),
+            timestamp_ms,
+            x: None,
+            y: None,
+            normalized_x: None,
+            normalized_y: None,
+            button: None,
+            key: None,
+            note: Some(note.clone()),
+            velocity: Some(velocity),
+            midi_pitch: Some(pitch),
+            midi_channel: Some(1),
+            midi_start_beats: Some(1.0),
+            midi_duration_beats: Some(0.25),
+            midi_tempo: Some(120.0),
+            midi_source: Some("lom_clip_notes".to_string()),
+            midi_note_id: Some(format!("test-{pitch}-{timestamp_ms}")),
+            window_title: Some("Untitled - Ableton Live 12 Suite".to_string()),
+            app_name: Some("Ableton Live".to_string()),
+            window_rect: None,
+            element_name: None,
+            element_role: None,
+            colour_hex: None,
+            semantic: Some(format!("midi_note:{note};midi_pitch:{pitch}")),
+            parameter_value_raw: None,
+            parameter_value_normalized: None,
+            parameter_value_capture_method: None,
+            api_target: Some("ableton:midi_input".to_string()),
+            api_device: Some("midi".to_string()),
+            api_param: Some("note".to_string()),
+        }
     }
 
     fn ableton_test_event(name: &str, semantic: Option<&str>) -> RecordedEvent {
@@ -5189,6 +6202,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
+            midi_pitch: None,
+            midi_channel: None,
+            midi_start_beats: None,
+            midi_duration_beats: None,
+            midi_tempo: None,
+            midi_source: None,
+            midi_note_id: None,
             window_title: Some("Untitled - Ableton Live 12 Suite".to_string()),
             app_name: Some("Ableton Live".to_string()),
             window_rect: Some(WindowRect {
@@ -5204,6 +6224,9 @@ mod tests {
             parameter_value_raw: None,
             parameter_value_normalized: None,
             parameter_value_capture_method: None,
+            api_target: None,
+            api_device: None,
+            api_param: None,
         }
     }
 
@@ -5388,6 +6411,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
             window_title: Some("Untitled - Paint".to_string()),
             app_name: Some("MS Paint".to_string()),
             window_rect: None,
@@ -5398,6 +6428,9 @@ mod tests {
             parameter_value_raw: None,
             parameter_value_normalized: None,
             parameter_value_capture_method: None,
+            api_target: None,
+            api_device: None,
+            api_param: None,
         };
 
         let route = route_switcher::select_route_for_event(
@@ -5471,6 +6504,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
+        midi_pitch: None,
+        midi_channel: None,
+        midi_start_beats: None,
+        midi_duration_beats: None,
+        midi_tempo: None,
+        midi_source: None,
+        midi_note_id: None,
             window_title: Some("Untitled - Notepad".to_string()),
             app_name: Some("Notepad".to_string()),
             window_rect: None,
@@ -5481,6 +6521,9 @@ mod tests {
             parameter_value_raw: None,
             parameter_value_normalized: None,
             parameter_value_capture_method: None,
+            api_target: None,
+            api_device: None,
+            api_param: None,
         };
         let mut next = current.clone();
         next.timestamp_ms = 5_000;
@@ -5491,3 +6534,4 @@ mod tests {
         );
     }
 }
+

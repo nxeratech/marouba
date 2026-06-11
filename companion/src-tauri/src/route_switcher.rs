@@ -297,6 +297,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
+            midi_pitch: None,
+            midi_channel: None,
+            midi_start_beats: None,
+            midi_duration_beats: None,
+            midi_tempo: None,
+            midi_source: None,
+            midi_note_id: None,
             window_title: Some("Test".to_string()),
             app_name: Some("Test App".to_string()),
             window_rect: Some(WindowRect {
@@ -312,6 +319,9 @@ mod tests {
             parameter_value_raw: None,
             parameter_value_normalized: None,
             parameter_value_capture_method: None,
+            api_target: None,
+            api_device: None,
+            api_param: None,
         }
     }
 
