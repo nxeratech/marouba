@@ -35,6 +35,9 @@ pub(crate) fn list_saved_workflows() -> (Value, u16) {
         if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
+        if is_steps_sidecar(&path) {
+            continue;
+        }
         if let Some(workflow) = workflow_summary_from_path(path) {
             workflows.push(workflow);
         }
@@ -205,7 +208,13 @@ fn parse_step_value(block: &str) -> Result<Value, String> {
 }
 fn workflow_content(name: &str) -> Option<String> {
     let path = vault_workflows_dir().join(format!("{name}.md"));
-    std::fs::read_to_string(path).ok()
+    let mut content = std::fs::read_to_string(&path).ok()?;
+    let sidecar = steps_sidecar_path(&path);
+    if let Ok(steps) = std::fs::read_to_string(sidecar) {
+        content.push_str("\n\n");
+        content.push_str(&steps);
+    }
+    Some(content)
 }
 
 fn frontmatter_block(content: &str) -> Option<&str> {
@@ -282,7 +291,12 @@ pub(crate) fn delete_saved_workflow(payload: ReplayWorkflowRequest) -> (Value, u
     };
     let path = vault_workflows_dir().join(format!("{name}.md"));
     match std::fs::remove_file(&path) {
-        Ok(_) => (json!({"status": "deleted", "name": name}), 200),
+        Ok(_) => {
+            let sidecar = steps_sidecar_path(&path);
+            let _ = std::fs::remove_file(sidecar);
+            let _ = regenerate_vault_index_and_graph();
+            (json!({"status": "deleted", "name": name}), 200)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
             json!({"status": "failed", "error": "workflow not found"}),
             404,
@@ -305,6 +319,164 @@ pub(crate) fn safe_workflow_name(value: &str) -> Result<String, String> {
     } else {
         Ok(name.to_string())
     }
+}
+
+pub(crate) fn regenerate_vault_index_and_graph() -> Result<(), String> {
+    let vault = vault_dir();
+    let workflows_dir = vault.join("workflows");
+    let elements_dir = vault.join("elements");
+    let runs_dir = vault.join("runs");
+    std::fs::create_dir_all(&workflows_dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&elements_dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&runs_dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(vault.join("signals")).map_err(|error| error.to_string())?;
+
+    let mut index_lines = Vec::new();
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+    let mut element_ids = std::collections::BTreeSet::new();
+    let entries = std::fs::read_dir(&workflows_dir).map_err(|error| error.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("md")
+            || is_steps_sidecar(&path)
+        {
+            continue;
+        }
+        let Some(content) = std::fs::read_to_string(&path).ok() else {
+            continue;
+        };
+        let Some(frontmatter) = frontmatter_block(&content) else {
+            continue;
+        };
+        let workflow_id = yaml_scalar_field(frontmatter, "id")
+            .unwrap_or_else(|| path.file_stem().and_then(|v| v.to_str()).unwrap_or("workflow").to_string());
+        let app = yaml_scalar_field(frontmatter, "app").unwrap_or_else(|| "Unknown".to_string());
+        let description = yaml_scalar_field(frontmatter, "description")
+            .unwrap_or_else(|| content.lines().find(|line| !line.trim().is_empty() && !line.starts_with("---") && !line.starts_with('#')).unwrap_or("Replay recorded workflow.").trim().to_string());
+        let tags = yaml_inline_list_field(frontmatter, "tags");
+        index_lines.push(bounded_index_line(&workflow_id, &app, &tags, &description));
+        nodes.push(json!({
+            "id": format!("workflow:{workflow_id}"),
+            "type": "workflow",
+            "path": relative_slash_path(&vault, &path),
+            "steps_path": relative_slash_path(&vault, &steps_sidecar_path(&path)),
+            "app": app,
+            "tags": tags,
+            "intent": description
+        }));
+        for element in std::iter::once(app).chain(tags.into_iter()) {
+            if element.trim().is_empty() {
+                continue;
+            }
+            let slug = slugify_element(&element);
+            let element_id = format!("element:{slug}");
+            element_ids.insert(slug);
+            links.push(json!({"from": format!("workflow:{workflow_id}"), "to": element_id, "type": "uses"}));
+        }
+        if let Ok(run_entries) = std::fs::read_dir(&runs_dir) {
+            for run_entry in run_entries.flatten() {
+                let run_path = run_entry.path();
+                let Some(file_name) = run_path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if file_name.ends_with(&format!("-{workflow_id}.json")) {
+                    let run_id = format!("run:{}", run_path.file_stem().and_then(|v| v.to_str()).unwrap_or(file_name));
+                    nodes.push(json!({"id": run_id, "type": "run", "path": relative_slash_path(&vault, &run_path)}));
+                    links.push(json!({"from": format!("workflow:{workflow_id}"), "to": run_id, "type": "ran"}));
+                }
+            }
+        }
+    }
+    for slug in element_ids {
+        let path = elements_dir.join(format!("{slug}.md"));
+        let _ = std::fs::write(&path, format!("# {slug}\n"));
+        nodes.push(json!({"id": format!("element:{slug}"), "type": "element", "path": relative_slash_path(&vault, &path)}));
+    }
+    std::fs::write(vault.join("index.md"), index_lines.join("\n") + if index_lines.is_empty() { "" } else { "\n" })
+        .map_err(|error| error.to_string())?;
+    std::fs::write(
+        vault.join("graph.json"),
+        serde_json::to_string_pretty(&json!({"nodes": nodes, "links": links})).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn steps_sidecar_path(path: &PathBuf) -> PathBuf {
+    if is_steps_sidecar(path) {
+        return path.clone();
+    }
+    path.with_file_name(format!(
+        "{}.steps.md",
+        path.file_stem().and_then(|value| value.to_str()).unwrap_or("workflow")
+    ))
+}
+
+pub(crate) fn hide_steps_sidecar(path: &PathBuf) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("attrib.exe");
+        command.arg("+h").arg(path);
+        let _ = no_window_command(&mut command).status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+    }
+}
+
+fn is_steps_sidecar(path: &PathBuf) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.ends_with(".steps.md"))
+}
+
+fn yaml_inline_list_field(frontmatter: &str, field: &str) -> Vec<String> {
+    let Some(raw) = yaml_scalar_field(frontmatter, field) else {
+        return Vec::new();
+    };
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(&raw) {
+        return values;
+    }
+    raw.trim_matches(['[', ']'])
+        .split(',')
+        .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn bounded_index_line(workflow_id: &str, app: &str, tags: &[String], intent: &str) -> String {
+    let tags_text = if tags.is_empty() {
+        "-".to_string()
+    } else {
+        tags.iter().take(4).cloned().collect::<Vec<_>>().join(",")
+    };
+    let prefix = format!("[[workflows/{workflow_id}|{workflow_id}]] · {app} · {tags_text} ·");
+    let mut words: Vec<&str> = intent.split_whitespace().collect();
+    while !words.is_empty() && format!("{} {}", prefix, words.join(" ")).split_whitespace().count() > 40 {
+        words.pop();
+    }
+    format!("{} {}", prefix, words.join(" "))
+}
+
+fn slugify_element(value: &str) -> String {
+    let slug = value
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if slug.is_empty() { "element".to_string() } else { slug }
+}
+
+fn relative_slash_path(root: &PathBuf, path: &PathBuf) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn format_modified_time(path: &PathBuf, modified: SystemTime) -> String {

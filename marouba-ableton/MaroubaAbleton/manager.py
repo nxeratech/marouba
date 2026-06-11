@@ -149,7 +149,7 @@ class Manager(ControlSurface):
             self._last_parameter_snapshot = self._parameter_snapshot(parameter)
 
     def _health(self, _params):
-        return ("ok", "marouba-ableton", "midi", "execute", "execute-v3")
+        return ("ok", "marouba-ableton", "midi", "execute", "execute-v3", "capture-13.5")
 
     def _selected_parameter(self, _params):
         parameter = self._selected_parameter_object()
@@ -217,6 +217,10 @@ class Manager(ControlSurface):
             return self._execute_automation(payload)
         if action in ("arrangement", "arrangement_op"):
             return self._execute_arrangement(payload)
+        if action in ("snapshot_devices", "devices.snapshot"):
+            return self._execute_device_snapshot(payload)
+        if action in ("snapshot_device", "device.snapshot"):
+            return self._execute_single_device_snapshot(payload)
         if action in ("load_device", "load_instrument", "load_preset", "browser.load", "ableton_browser"):
             return self._execute_load_device(payload)
         raise RuntimeError("unsupported Ableton action: %s" % action)
@@ -306,10 +310,14 @@ class Manager(ControlSurface):
             strict=True,
         )
         applied = self._apply_device_parameter_snapshot(device, payload.get("parameter_snapshot"))
+        track_index, track_id = self._track_identity(track)
         return {
             "action": "load_device",
             "route": "api",
             "track": self._safe_name(track),
+            "track_name": self._safe_name(track),
+            "track_index": track_index,
+            "track_id": track_id,
             "device": self._safe_name(device),
             "target_index": target_index,
             "replace": replace,
@@ -317,6 +325,91 @@ class Manager(ControlSurface):
             "parameters_applied": applied,
             "target": "track:%s/device:%s" % (self._safe_name(track), self._safe_name(device)),
         }
+
+    def _execute_device_snapshot(self, payload):
+        payload = self._route_payload(payload)
+        track = self._resolve_track(payload)
+        track_index, track_id = self._track_identity(track)
+        include_parameters = bool(payload.get("include_parameters") or payload.get("full"))
+        devices = []
+        for index, device in enumerate(list(getattr(track, "devices", []) or [])):
+            parameters = []
+            if include_parameters:
+                parameters = self._device_parameter_snapshot(device)
+            device_index, device_id = self._device_identity(device, index)
+            item = {
+                "index": index,
+                "id": device_id,
+                "name": self._safe_name(device),
+                "class_name": device.__class__.__name__,
+            }
+            if include_parameters:
+                item["parameters"] = parameters
+            devices.append(item)
+        return {
+            "action": "snapshot_devices",
+            "route": "api",
+            "source": "ableton_lom",
+            "compact": not include_parameters,
+            "track": self._safe_name(track),
+            "track_name": self._safe_name(track),
+            "track_index": track_index,
+            "track_id": track_id,
+            "devices": devices,
+        }
+
+    def _execute_single_device_snapshot(self, payload):
+        payload = self._route_payload(payload)
+        track = self._resolve_track(payload)
+        devices = list(getattr(track, "devices", []) or [])
+        device_index = payload.get("device_index", payload.get("target_index", payload.get("index", None)))
+        device = None
+        if device_index is not None:
+            try:
+                device = devices[int(device_index)]
+            except Exception:
+                device = None
+        if device is None:
+            device = self._resolve_device(payload, track, strict=True)
+            try:
+                device_index = devices.index(device)
+            except Exception:
+                device_index = -1
+        track_index, track_id = self._track_identity(track)
+        device_index, device_id = self._device_identity(device, device_index)
+        return {
+            "action": "snapshot_device",
+            "route": "api",
+            "source": "ableton_lom",
+            "track": self._safe_name(track),
+            "track_name": self._safe_name(track),
+            "track_index": track_index,
+            "track_id": track_id,
+            "device": {
+                "index": device_index,
+                "id": device_id,
+                "name": self._safe_name(device),
+                "class_name": device.__class__.__name__,
+                "parameters": self._device_parameter_snapshot(device),
+            },
+        }
+
+    def _device_parameter_snapshot(self, device):
+        parameters = []
+        for parameter in list(getattr(device, "parameters", []) or []):
+            try:
+                minimum = self._float_or_default(getattr(parameter, "min", 0.0), 0.0)
+                maximum = self._float_or_default(getattr(parameter, "max", 1.0), 1.0)
+                value = self._float_or_default(getattr(parameter, "value", minimum), minimum)
+                normalized = 0.0 if maximum == minimum else (value - minimum) / (maximum - minimum)
+                parameters.append({
+                    "name": self._safe_name(parameter),
+                    "display_value": str(parameter),
+                    "normalized": max(0.0, min(1.0, normalized)),
+                })
+            except Exception:
+                continue
+        return parameters
 
     def _execute_play_note(self, payload):
         payload = self._route_payload(payload)
@@ -448,9 +541,20 @@ class Manager(ControlSurface):
 
     def _resolve_track(self, payload):
         parts = self._target_parts(payload)
-        track_name = str(payload.get("track") or payload.get("track_name") or parts.get("track") or "").lower()
+        track_id = str(payload.get("track_id") or parts.get("track_id") or "").strip()
+        track_name = str(
+            payload.get("track")
+            or payload.get("track_name")
+            or parts.get("track_name")
+            or parts.get("track")
+            or ""
+        ).lower()
         track_index = payload.get("track_index")
         tracks = list(getattr(self._song(), "tracks", []) or [])
+        if track_id:
+            for index, track in enumerate(tracks):
+                if self._track_identity(track, index)[1] == track_id:
+                    return track
         if track_index is not None:
             try:
                 return tracks[int(track_index)]
@@ -464,6 +568,32 @@ class Manager(ControlSurface):
         if track is None:
             raise RuntimeError("selected track unavailable")
         return track
+
+    def _track_identity(self, track, known_index=None):
+        tracks = list(getattr(self._song(), "tracks", []) or [])
+        index = known_index
+        if index is None:
+            for candidate_index, candidate in enumerate(tracks):
+                if candidate == track:
+                    index = candidate_index
+                    break
+        if index is None:
+            index = -1
+        live_ptr = getattr(track, "_live_ptr", None)
+        if live_ptr is not None:
+            return index, "lom:%s" % live_ptr
+        return index, "track_index:%s" % index
+
+    def _device_identity(self, device, known_index=None):
+        index = -1 if known_index is None else known_index
+        try:
+            index = int(index)
+        except Exception:
+            index = -1
+        live_ptr = getattr(device, "_live_ptr", None)
+        if live_ptr is not None:
+            return index, "lom:%s" % live_ptr
+        return index, "device_index:%s" % index
 
     def _resolve_device(self, payload, track, strict=None):
         parts = self._target_parts(payload)
@@ -887,9 +1017,12 @@ class Manager(ControlSurface):
         normalized = self._normalized_parameter_value(parameter, raw_value)
         display = self._display_parameter_value(parameter, raw_value)
         track_name = self._safe_name(track)
+        track_index, track_id = self._track_identity(track)
         device_name = self._safe_name(device)
         param_name = self._safe_name(parameter)
-        target = "track:%s/device:%s/parameter:%s" % (
+        target = "track_id:%s/track_index:%s/track_name:%s/device:%s/parameter:%s" % (
+            track_id,
+            track_index,
             track_name,
             device_name,
             param_name,
@@ -901,6 +1034,8 @@ class Manager(ControlSurface):
             display,
             "%.12f" % normalized,
             target,
+            track_id,
+            str(track_index),
         )
 
     def _device_for_parameter(self, parameter):

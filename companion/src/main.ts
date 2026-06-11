@@ -65,6 +65,7 @@ let apiToken: string | null = null;
 let workflows: VaultWorkflow[] = [];
 let selectedWorkflow: VaultWorkflow | null = null;
 let isSavingWorkflow = false;
+let currentMode = "idle";
 
 recordButton.addEventListener("click", async () => {
   savedStatus = null;
@@ -77,7 +78,11 @@ recordButton.addEventListener("click", async () => {
 
 stopButton.addEventListener("click", async () => {
   message.textContent = "";
-  await invoke("stop_recording");
+  if (currentMode === "replaying") {
+    await companionFetch<{ status: string }>("/replay/stop", { method: "POST" });
+  } else {
+    await invoke("stop_recording");
+  }
   await refresh();
 });
 
@@ -117,16 +122,19 @@ replayWorkflowButton.addEventListener("click", async () => {
   replayStatus.className = "running";
   replayStatus.textContent = "Replay running...";
   try {
-    const result = await companionFetch<{ status?: string; ok?: boolean; pid?: number; error?: string; detail?: string; focused_window?: string; target_app?: string }>("/replay", {
+    const result = await companionFetch<{ status?: string; ok?: boolean; pid?: number; error?: string; message?: string; detail?: string; focused_window?: string; target_app?: string }>("/replay", {
       method: "POST",
       body: JSON.stringify({ name: selectedWorkflow.name }),
     });
     const succeeded = result.status === "started" || result.status === "ok" || result.ok === true;
-    replayStatus.className = succeeded ? "completed" : "failed";
+    const aborted = result.status === "aborted" || result.error === "replay aborted";
+    replayStatus.className = succeeded || aborted ? "completed" : "failed";
     if (succeeded) {
       const pid = result.pid ? ` (pid ${result.pid})` : "";
       const focused = result.focused_window ? ` - focused ${result.focused_window}` : "";
       replayStatus.textContent = `Replay started${pid}${focused}`;
+    } else if (aborted) {
+      replayStatus.textContent = result.message ?? "Replay aborted by user";
     } else {
       if (result.error === "failed to focus target window") {
         replayStatus.textContent = `Please open ${result.target_app ?? "the target app"} first, then click Replay.`;
@@ -135,8 +143,14 @@ replayWorkflowButton.addEventListener("click", async () => {
       }
     }
   } catch (error) {
-    replayStatus.className = "failed";
-    replayStatus.textContent = String(error);
+    const message = String(error);
+    if (message.toLowerCase().includes("replay aborted")) {
+      replayStatus.className = "completed";
+      replayStatus.textContent = "Replay aborted by user";
+    } else {
+      replayStatus.className = "failed";
+      replayStatus.textContent = message;
+    }
   }
 });
 
@@ -164,11 +178,20 @@ saveButton.addEventListener("click", async () => {
   updateSaveState();
   message.textContent = "Saving workflow...";
   try {
-    const path = await invoke<string>("save_workflow", {
+    const saved = await invoke<string>("save_workflow", {
       request: { name, keep_indexes: keepIndexes },
     });
-    savedStatus = `Saved: ${name}`;
-    message.textContent = path;
+    let path = saved;
+    let slug = "";
+    try {
+      const parsed = JSON.parse(saved) as { path?: string; slug?: string };
+      path = parsed.path ?? saved;
+      slug = parsed.slug ?? "";
+    } catch {
+      path = saved;
+    }
+    savedStatus = `Saved: ${slug || name}`;
+    message.textContent = slug ? `${path} (slug: ${slug})` : path;
     resetWorkflowName();
     await refresh();
   } catch (error) {
@@ -331,10 +354,12 @@ function renderWorkflows() {
 
 function render(status: RecordingStatus) {
   const isRecording = status.mode === "recording";
-  mode.textContent = savedStatus ?? (isRecording ? "Recording..." : "Idle");
+  const isReplaying = status.mode === "replaying";
+  currentMode = status.mode;
+  mode.textContent = savedStatus ?? (isRecording ? "Recording..." : isReplaying ? "Replaying..." : "Idle");
   dot.classList.toggle("recording", status.mode === "recording");
   recordButton.disabled = isRecording;
-  stopButton.disabled = !isRecording;
+  stopButton.disabled = !isRecording && !isReplaying;
   const title = status.active_window.title || "Marouba";
   const appName = status.active_window.app_name || "";
   windowLabel.textContent = appName && appName !== "unknown" ? `${appName} - ${title}` : title;

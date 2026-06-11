@@ -20,9 +20,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::panic;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex, OnceLock,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
@@ -60,7 +64,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU,
-    VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
+    VK_ESCAPE, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -83,6 +87,8 @@ struct AppState {
     started_polling: bool,
     active_window: WindowInfo,
     ableton_bridge: Arc<Mutex<AbletonBridgeSupervisor>>,
+    replaying: bool,
+    replay_abort: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,8 +215,10 @@ struct KeyboardHookEvent {
 #[cfg(target_os = "windows")]
 static KEYBOARD_HOOK_SENDER: OnceLock<Mutex<Option<mpsc::Sender<KeyboardHookEvent>>>> =
     OnceLock::new();
+static REPLAY_ABORT_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 fn main() {
+    install_panic_logger();
     if std::env::args().any(|arg| arg == "--marouba-osc-bridge") {
         if let Err(error) = run_ableton_osc_bridge() {
             eprintln!("marouba osc bridge failed: {error}");
@@ -223,6 +231,8 @@ fn main() {
     let ableton_bridge = Arc::new(Mutex::new(AbletonBridgeSupervisor::new(
         AbletonBridgeConfig::from_env(),
     )));
+    let replay_abort = Arc::new(AtomicBool::new(false));
+    let _ = REPLAY_ABORT_FLAG.set(replay_abort.clone());
     let state = Arc::new(Mutex::new(AppState {
         recording: false,
         events: Vec::new(),
@@ -230,6 +240,8 @@ fn main() {
         started_polling: false,
         active_window: active_window(),
         ableton_bridge: ableton_bridge.clone(),
+        replaying: false,
+        replay_abort,
     }));
 
     let api_state = state.clone();
@@ -290,12 +302,29 @@ fn show_startup_message(title: &str, body: &str) {
     }
 }
 
+fn install_panic_logger() {
+    panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic payload");
+        write_debug_log(&format!("PANIC: {payload} at {location}"));
+    }));
+}
+
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let record = MenuItem::with_id(app, "record", "Record", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "Stop", true, None::<&str>)?;
+    let stop_replay = MenuItem::with_id(app, "stop_replay", "Stop Replay", true, None::<&str>)?;
     let vault = MenuItem::with_id(app, "open_vault", "Open Vault", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&record, &stop, &vault, &quit])?;
+    let menu = Menu::with_items(app, &[&record, &stop, &stop_replay, &vault, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
         .tooltip("Marouba")
@@ -311,6 +340,14 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "stop" => {
                 if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
                     let _ = stop_recording_from_state(state.inner().clone());
+                }
+                show_popup(app);
+            }
+            "stop_replay" => {
+                if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
+                    request_replay_abort(state.inner().clone(), "tray Stop Replay");
+                } else {
+                    request_global_replay_abort();
                 }
                 show_popup(app);
             }
@@ -429,12 +466,16 @@ fn save_workflow_from_state(
         return Err("No steps selected for this workflow".to_string());
     }
     let metadata = describe_with_claude(&request.name, &events);
+    let slug = slugify(&request.name);
     let path = write_workflow(&request.name, &events, metadata)?;
     let mut guard = state
         .lock()
         .map_err(|_| "recording state is unavailable".to_string())?;
-    push_log(&mut guard, format!("Saved {}", path.display()));
-    Ok(path.display().to_string())
+    push_log(
+        &mut guard,
+        format!("Saved {} as slug {}", path.display(), slug),
+    );
+    Ok(json!({"path": path.display().to_string(), "slug": slug}).to_string())
 }
 
 #[tauri::command]
@@ -526,7 +567,14 @@ fn stop_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> 
 fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
     match state.lock() {
         Ok(guard) => RecordingStatus {
-            mode: if guard.recording { "recording" } else { "idle" }.to_string(),
+            mode: if guard.recording {
+                "recording"
+            } else if guard.replaying {
+                "replaying"
+            } else {
+                "idle"
+            }
+            .to_string(),
             active_window: guard.active_window.clone(),
             steps: guard.events.clone(),
             last_actions: guard.last_actions.clone(),
@@ -553,6 +601,50 @@ fn ableton_bridge_from_state(
     state: &Arc<Mutex<AppState>>,
 ) -> Option<Arc<Mutex<AbletonBridgeSupervisor>>> {
     state.lock().ok().map(|guard| guard.ableton_bridge.clone())
+}
+
+fn request_global_replay_abort() {
+    if let Some(flag) = REPLAY_ABORT_FLAG.get() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    write_debug_log("replay abort requested");
+}
+
+fn request_replay_abort(state: Arc<Mutex<AppState>>, source: &str) {
+    request_global_replay_abort();
+    if let Ok(mut guard) = state.lock() {
+        guard.replay_abort.store(true, Ordering::SeqCst);
+        push_log(&mut guard, format!("Replay abort requested: {source}"));
+    }
+}
+
+fn replay_abort_requested(state: &Arc<Mutex<AppState>>) -> bool {
+    if REPLAY_ABORT_FLAG
+        .get()
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    state
+        .lock()
+        .map(|guard| guard.replay_abort.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn set_replay_active(state: &Arc<Mutex<AppState>>, active: bool) {
+    if let Ok(mut guard) = state.lock() {
+        guard.replaying = active;
+        if active {
+            guard.replay_abort.store(false, Ordering::SeqCst);
+            if let Some(flag) = REPLAY_ABORT_FLAG.get() {
+                flag.store(false, Ordering::SeqCst);
+            }
+            push_log(&mut guard, "Replay started".to_string());
+        } else {
+            push_log(&mut guard, "Replay stopped".to_string());
+        }
+    }
 }
 
 fn start_keyboard_hook_thread() {
@@ -600,6 +692,13 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         };
         if let Some(kind) = kind {
             let info = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+            if kind == "keydown"
+                && info.vkCode == VK_ESCAPE.0 as u32
+                && (GetAsyncKeyState(VK_CONTROL.0 as i32) & 0x8000u16 as i16) != 0
+                && (GetAsyncKeyState(VK_MENU.0 as i32) & 0x8000u16 as i16) != 0
+            {
+                request_global_replay_abort();
+            }
             let event = KeyboardHookEvent {
                 kind,
                 vk: info.vkCode as i32,
@@ -632,6 +731,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let mut ableton_bridge_repair_logged = false;
     let mut last_ableton_bridge_check = Instant::now() - Duration::from_secs(5);
     let mut ableton_parameter_drag_active = false;
+    let mut ableton_device_drag_baseline: Option<Value> = None;
     let mut keyboard_hook_rx: Option<mpsc::Receiver<KeyboardHookEvent>> = None;
 
     loop {
@@ -779,10 +879,31 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                 );
                 if left && title_is_ableton(&window.title) {
                     ableton_parameter_drag_active = is_parameter_event_candidate(&event);
+                    ableton_device_drag_baseline = match ableton_device_snapshot_result(&state) {
+                        Ok(snapshot) => {
+                            write_debug_log(&format!(
+                                "ableton load diff before snapshot: {}",
+                                describe_ableton_device_snapshot(&snapshot)
+                            ));
+                            Some(snapshot)
+                        }
+                        Err(error) => {
+                            write_debug_log(&format!(
+                                "ableton load diff before snapshot unavailable: {error}"
+                            ));
+                            add_semantic_tag(&mut event, "lom_snapshot_unavailable");
+                            None
+                        }
+                    };
                 }
                 if !left && title_is_ableton(&window.title) && ableton_parameter_drag_active {
                     enrich_ableton_api_parameter_value(&state, &mut event);
                     ableton_parameter_drag_active = false;
+                }
+                if !left && title_is_ableton(&window.title) {
+                    if let Some(before) = ableton_device_drag_baseline.take() {
+                        enrich_ableton_load_diff(&state, &mut event, &before);
+                    }
                 }
                 if title_is_ableton(&window.title) && event.kind == "mousedown" {
                     if event.element_name.as_deref() == Some("Search") {
@@ -1039,6 +1160,244 @@ fn enrich_ableton_api_parameter_value(state: &Arc<Mutex<AppState>>, event: &mut 
     event.api_target = Some(snapshot.target);
     event.api_device = Some(snapshot.device);
     event.api_param = Some(snapshot.parameter);
+}
+
+fn ableton_device_snapshot(state: &Arc<Mutex<AppState>>) -> Option<Value> {
+    ableton_device_snapshot_result(state).ok()
+}
+
+fn ableton_device_snapshot_result(state: &Arc<Mutex<AppState>>) -> Result<Value, String> {
+    let payload = json!({
+        "action": "snapshot_devices",
+        "route": {
+            "type": "api",
+            "api": "ableton_lom",
+            "action": "snapshot_devices",
+            "source": "ableton_lom",
+            "compact": true
+        }
+    });
+    ableton_execute_json(state, payload)
+}
+
+fn ableton_single_device_snapshot_result(
+    state: &Arc<Mutex<AppState>>,
+    before: &Value,
+    device: &Value,
+) -> Result<Value, String> {
+    let payload = json!({
+        "action": "snapshot_device",
+        "route": {
+            "type": "api",
+            "api": "ableton_lom",
+            "action": "snapshot_device",
+            "source": "ableton_lom",
+            "track_id": before.get("track_id").cloned().unwrap_or(Value::Null),
+            "track_index": before.get("track_index").cloned().unwrap_or(Value::Null),
+            "device_id": device.get("id").cloned().unwrap_or(Value::Null),
+            "device_index": device.get("index").cloned().unwrap_or(Value::Null),
+            "device": device.get("name").cloned().unwrap_or(Value::Null)
+        }
+    });
+    ableton_execute_json(state, payload)
+}
+
+fn ableton_execute_json(state: &Arc<Mutex<AppState>>, payload: Value) -> Result<Value, String> {
+    let bridge = ableton_bridge_from_state(state)
+        .ok_or_else(|| "Ableton bridge state unavailable".to_string())?;
+    let mut guard = bridge
+        .lock()
+        .map_err(|_| "Ableton bridge lock poisoned".to_string())?;
+    guard.execute(payload)
+}
+
+fn enrich_ableton_load_diff(
+    state: &Arc<Mutex<AppState>>,
+    event: &mut RecordedEvent,
+    before: &Value,
+) {
+    let mut found = None;
+    let mut after_snapshot_available = false;
+    for delay_ms in [150u64, 300, 600, 900, 1_200] {
+        thread::sleep(Duration::from_millis(delay_ms));
+        match ableton_device_snapshot_result(state) {
+            Ok(after) => {
+                after_snapshot_available = true;
+                write_debug_log(&format!(
+                    "ableton load diff after snapshot delay={delay_ms}ms: {}",
+                    describe_ableton_device_snapshot(&after)
+                ));
+                if let Some(device) = detected_loaded_device(before, &after) {
+                    write_debug_log(&format!(
+                        "ableton load diff verified device after delay={delay_ms}ms: {}",
+                        device
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                    ));
+                    let full_device =
+                        match ableton_single_device_snapshot_result(state, before, device) {
+                            Ok(snapshot) => {
+                                write_debug_log(&format!(
+                                    "ableton load diff full device snapshot: {}",
+                                    describe_ableton_single_device_snapshot(&snapshot)
+                                ));
+                                snapshot
+                                    .get("device")
+                                    .cloned()
+                                    .unwrap_or_else(|| device.clone())
+                            }
+                            Err(error) => {
+                                write_debug_log(&format!(
+                                    "ableton load diff full device snapshot unavailable: {error}"
+                                ));
+                                device.clone()
+                            }
+                        };
+                    found = Some(full_device);
+                    break;
+                }
+            }
+            Err(error) => {
+                write_debug_log(&format!(
+                    "ableton load diff after snapshot unavailable delay={delay_ms}ms: {error}"
+                ));
+            }
+        }
+    }
+    let Some(device) = found else {
+        if after_snapshot_available {
+            write_debug_log(&format!(
+                "ableton load diff: snapshot ok, no diff. before={}",
+                describe_ableton_device_snapshot(before)
+            ));
+            add_semantic_tag(event, "lom_snapshot_no_diff");
+        } else {
+            write_debug_log("ableton load diff: snapshot_unavailable during post-mouseup polling");
+            add_semantic_tag(event, "lom_snapshot_unavailable");
+        }
+        return;
+    };
+    let Some(name) = device.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    event.parameter_value_capture_method = Some("ableton_lom".to_string());
+    event.api_param = Some("load_device".to_string());
+    event.api_device = Some(name.to_string());
+    event.api_target = Some(ableton_load_api_target_from_snapshot(before, &device));
+    event.parameter_value_raw = Some(device.to_string());
+    let class_name = device
+        .get("class_name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    add_semantic_tag(
+        event,
+        format!("lom_device_loaded:{name};device_class:{class_name}"),
+    );
+}
+
+fn detected_loaded_device<'a>(before: &Value, after: &'a Value) -> Option<&'a Value> {
+    let before_devices = before.get("devices")?.as_array()?;
+    let after_devices = after.get("devices")?.as_array()?;
+    for (index, after_device) in after_devices.iter().enumerate() {
+        let after_name = after_device.get("name").and_then(Value::as_str);
+        let before_name = before_devices
+            .get(index)
+            .and_then(|device| device.get("name"))
+            .and_then(Value::as_str);
+        if after_name.is_some() && after_name != before_name {
+            return Some(after_device);
+        }
+    }
+    if after_devices.len() > before_devices.len() {
+        return after_devices.get(before_devices.len());
+    }
+    None
+}
+
+fn ableton_load_api_target_from_snapshot(snapshot: &Value, device: &Value) -> String {
+    let track_id = snapshot
+        .get("track_id")
+        .and_then(Value::as_str)
+        .unwrap_or("selected");
+    let track_index = snapshot
+        .get("track_index")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    let track_name = snapshot
+        .get("track")
+        .and_then(Value::as_str)
+        .unwrap_or("selected track");
+    let device_index = device
+        .get("index")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let device_name = device
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown device");
+    format!(
+        "track_id:{track_id}/track_index:{track_index}/track_name:{track_name}/device_index:{device_index}/device:{device_name}"
+    )
+}
+
+fn describe_ableton_device_snapshot(snapshot: &Value) -> String {
+    let track = snapshot
+        .get("track")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let track_id = snapshot
+        .get("track_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let track_index = snapshot
+        .get("track_index")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    let names: Vec<String> = snapshot
+        .get("devices")
+        .and_then(Value::as_array)
+        .map(|devices| {
+            devices
+                .iter()
+                .filter_map(|device| device.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    format!(
+        "track={track:?} track_id={track_id:?} track_index={track_index} device_count={} devices=[{}]",
+        names.len(),
+        names.join(", ")
+    )
+}
+
+fn describe_ableton_single_device_snapshot(snapshot: &Value) -> String {
+    let track = snapshot
+        .get("track")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let track_id = snapshot
+        .get("track_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let device = snapshot.get("device").unwrap_or(&Value::Null);
+    let name = device
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let index = device
+        .get("index")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    let param_count = device
+        .get("parameters")
+        .and_then(Value::as_array)
+        .map(|params| params.len())
+        .unwrap_or(0);
+    format!(
+        "track={track:?} track_id={track_id:?} device={name:?} device_index={index} parameter_count={param_count}"
+    )
 }
 
 fn drain_ableton_midi_events(
@@ -1668,6 +2027,10 @@ fn start_http_api(
                 let (body, status) = start_replay_workflow(payload, state.clone());
                 json_response(body, status)
             }
+            (Method::Post, "/replay/stop") => {
+                request_replay_abort(state.clone(), "HTTP /replay/stop");
+                json_response(json!({"status": "stopping"}), 200)
+            }
             (Method::Post, "/workflow/delete") => {
                 let payload: ReplayWorkflowRequest = read_json(&mut request);
                 let (body, status) = delete_saved_workflow(payload);
@@ -1731,8 +2094,22 @@ fn start_replay_workflow(
         return (json!({"status": "failed", "error": error}), 400);
     }
 
+    if state.lock().map(|guard| guard.recording).unwrap_or(false) {
+        return (
+            json!({
+                "status": "failed",
+                "error": "recording is active; replay is refused until recording stops"
+            }),
+            409,
+        );
+    }
+
+    set_replay_active(&state, true);
+
     if let Some(steps) = parse_v2_workflow_steps(&name).filter(|steps| !steps.is_empty()) {
-        return replay_v2_workflow(&name, steps, &state);
+        let result = replay_v2_workflow(&name, steps, &state);
+        set_replay_active(&state, false);
+        return result;
     }
 
     if let Some(events) = parse_gesture_workflow(&name) {
@@ -1748,7 +2125,7 @@ fn start_replay_workflow(
                         .first()
                         .map(|title| app_name_from_title(title))
                         .unwrap_or_else(|| "the target app".to_string());
-                    return (
+                    let result = (
                         json!({
                             "status": "failed",
                             "error": error.clone(),
@@ -1758,6 +2135,8 @@ fn start_replay_workflow(
                         }),
                         200,
                     );
+                    set_replay_active(&state, false);
+                    return result;
                 }
             }
         };
@@ -1771,7 +2150,19 @@ fn start_replay_workflow(
             events,
         });
         if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
-            return (
+            write_replay_run_log(
+                &name,
+                "failed",
+                &[json!({
+                    "step": "legacy_gesture",
+                    "route": "gesture",
+                    "reason": body
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("gesture replay failed")
+                })],
+            );
+            let result = (
                 json!({
                     "status": "failed",
                     "error": body
@@ -1783,11 +2174,19 @@ fn start_replay_workflow(
                 }),
                 status,
             );
+            set_replay_active(&state, false);
+            return result;
         }
         if let Value::Object(ref mut object) = body {
             object.insert("status".to_string(), json!("ok"));
             object.insert("focused_window".to_string(), json!(focused_window));
         }
+        write_replay_run_log(
+            &name,
+            "ok",
+            &[json!({"step": "legacy_gesture", "route": "gesture", "output": body.clone()})],
+        );
+        set_replay_active(&state, false);
         return (body, status);
     }
 
@@ -1800,13 +2199,29 @@ fn start_replay_workflow(
         "{}",
     ]);
     let child = no_window_command(&mut command).spawn();
-    match child {
-        Ok(child) => (json!({"status": "started", "pid": child.id()}), 200),
-        Err(error) => (
-            json!({"status": "failed", "error": format!("failed to start replay: {error}")}),
-            500,
-        ),
-    }
+    let result = match child {
+        Ok(child) => {
+            write_replay_run_log(
+                &name,
+                "started",
+                &[json!({"step": "python_replay", "route": "subprocess", "pid": child.id()})],
+            );
+            (json!({"status": "started", "pid": child.id()}), 200)
+        }
+        Err(error) => {
+            write_replay_run_log(
+                &name,
+                "failed",
+                &[json!({"step": "python_replay", "route": "subprocess", "reason": error.to_string()})],
+            );
+            (
+                json!({"status": "failed", "error": format!("failed to start replay: {error}")}),
+                500,
+            )
+        }
+    };
+    set_replay_active(&state, false);
+    result
 }
 
 fn replay_target_windows(name: &str, events: &[RecordedEvent]) -> Vec<String> {
@@ -2421,6 +2836,16 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
+    if REPLAY_ABORT_FLAG
+        .get()
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        return (
+            json!({"ok": false, "status": "aborted", "replayed": 0, "target_window": payload.target_window, "message": "Replay aborted by user"}),
+            200,
+        );
+    }
     let replay_rect = active_window_rect();
     if let Some(rect) = replay_rect.as_ref() {
         write_debug_log(&format!(
@@ -2504,6 +2929,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     }
     let mut index = 0usize;
     while index < replay_events.len() {
+        if REPLAY_ABORT_FLAG
+            .get()
+            .map(|flag| flag.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
+            return (
+                json!({"ok": false, "status": "aborted", "replayed": replayed, "target_window": payload.target_window, "message": "Replay aborted by user"}),
+                200,
+            );
+        }
         let event = replay_events[index];
         let event_type =
             classifier::classify_event(&payload.events, source_event_index(&payload.events, event));
@@ -2880,6 +3315,8 @@ fn replay_v2_workflow(
     steps: Vec<VaultReplayStep>,
     state: &Arc<Mutex<AppState>>,
 ) -> (Value, u16) {
+    let run_log_path = replay_run_log_path(name);
+    write_replay_run_log_update(run_log_path.as_deref(), name, "started", &[]);
     let all_events: Vec<RecordedEvent> = steps
         .iter()
         .filter_map(VaultReplayStep::gesture_events)
@@ -2897,6 +3334,17 @@ fn replay_v2_workflow(
                     .first()
                     .map(|title| app_name_from_title(title))
                     .unwrap_or_else(|| "the target app".to_string());
+                write_replay_run_log_update(
+                    run_log_path.as_deref(),
+                    name,
+                    "failed",
+                    &[json!({
+                        "step": "preflight",
+                        "route": "repair",
+                        "reason": error.clone(),
+                        "target_windows": tried.clone()
+                    })],
+                );
                 return (
                     json!({
                         "status": "failed",
@@ -2916,6 +3364,16 @@ fn replay_v2_workflow(
         .any(|window| window.to_ascii_lowercase().contains("ableton live"))
     {
         if let Err(error) = wait_for_ableton_execute_ready(state, Duration::from_secs(60)) {
+            write_replay_run_log_update(
+                run_log_path.as_deref(),
+                name,
+                "failed",
+                &[json!({
+                    "step": "preflight",
+                    "route": "repair",
+                    "reason": error.clone()
+                })],
+            );
             return (
                 json!({
                     "status": "failed",
@@ -2929,42 +3387,102 @@ fn replay_v2_workflow(
 
     let mut replayed_steps = 0usize;
     let mut route_log = Vec::new();
+    let mut consecutive_api_failures = 0usize;
     for step in steps {
+        if replay_abort_requested(state) {
+            route_log.push(json!({
+                "step": step.id,
+                "route": "abort",
+                "reason": "replay abort requested"
+            }));
+            write_replay_run_log_update(run_log_path.as_deref(), name, "aborted", &route_log);
+            return (
+                json!({
+                    "status": "aborted",
+                    "message": "Replay aborted by user",
+                    "routes": route_log
+                }),
+                200,
+            );
+        }
         if let Some(api_route) = api_route_for_step(&step) {
             match replay_api_step(&step, api_route.clone(), state) {
                 Ok(output) => {
+                    consecutive_api_failures = 0;
                     replayed_steps += 1;
                     route_log.push(json!({"step": step.id, "route": "api", "output": output}));
+                    write_replay_run_log_update(
+                        run_log_path.as_deref(),
+                        name,
+                        "running",
+                        &route_log,
+                    );
                     continue;
                 }
                 Err(error) => {
+                    consecutive_api_failures += 1;
                     write_debug_log(&format!(
                         "api route failed for {}: {}; falling back to lower route",
                         step.id, error
                     ));
-                    if api_failure_requires_repair(&step, &error) {
-                        route_log.push(json!({
-                            "step": step.id,
-                            "route": "repair",
-                            "reason": error,
-                            "policy": "missing api target; refusing blind gesture fallback"
-                        }));
+                    route_log.push(json!({
+                        "step": step.id,
+                        "route": "repair",
+                        "reason": error,
+                        "failed_route": "api"
+                    }));
+                    if step.step_type == "load_device" {
+                        write_replay_run_log_update(
+                            run_log_path.as_deref(),
+                            name,
+                            "failed",
+                            &route_log,
+                        );
                         return (
                             json!({
                                 "status": "failed",
-                                "error": "api target unavailable",
+                                "error": "load_device api route failed; refusing blind fallback",
                                 "detail": route_log.last().cloned().unwrap_or(Value::Null),
                                 "step": step.id,
-                                "intent": step.intent
+                                "intent": step.intent,
+                                "routes": route_log
                             }),
                             200,
                         );
                     }
-                    route_log.push(json!({
-                        "step": step.id,
-                        "route": "api",
-                        "fallback_reason": error
-                    }));
+                    if api_failure_requires_repair(&step, &error) || consecutive_api_failures >= 3 {
+                        route_log.push(json!({
+                            "step": step.id,
+                            "route": "repair",
+                            "reason": if consecutive_api_failures >= 3 {
+                                format!("{} consecutive api failures", consecutive_api_failures)
+                            } else {
+                                "missing api target; refusing blind gesture fallback".to_string()
+                            },
+                            "policy": "repair threshold reached"
+                        }));
+                        write_replay_run_log_update(
+                            run_log_path.as_deref(),
+                            name,
+                            "failed",
+                            &route_log,
+                        );
+                        return (
+                            json!({
+                                "status": "failed",
+                                "error": if consecutive_api_failures >= 3 {
+                                    "api failure threshold reached"
+                                } else {
+                                    "api target unavailable"
+                                },
+                                "detail": route_log.last().cloned().unwrap_or(Value::Null),
+                                "step": step.id,
+                                "intent": step.intent,
+                                "routes": route_log
+                            }),
+                            200,
+                        );
+                    }
                 }
             }
         }
@@ -2974,6 +3492,12 @@ fn replay_v2_workflow(
                 Ok(route) => {
                     replayed_steps += 1;
                     route_log.push(json!({"step": step.id, "route": route}));
+                    write_replay_run_log_update(
+                        run_log_path.as_deref(),
+                        name,
+                        "running",
+                        &route_log,
+                    );
                     continue;
                 }
                 Err(error) => {
@@ -2989,6 +3513,7 @@ fn replay_v2_workflow(
         } else {
             route_log.push(json!({"step": step.id, "route": "gesture"}));
         }
+        write_replay_run_log_update(run_log_path.as_deref(), name, "running", &route_log);
 
         let Some(events) = step.gesture_events() else {
             continue;
@@ -2999,23 +3524,54 @@ fn replay_v2_workflow(
             events,
         });
         if status >= 400 || body.get("ok").and_then(Value::as_bool) == Some(false) {
+            let reason = body
+                .get("error")
+                .and_then(Value::as_str)
+                .or_else(|| body.get("message").and_then(Value::as_str))
+                .unwrap_or("step replay failed");
+            let aborted = reason.eq_ignore_ascii_case("replay aborted")
+                || body.get("status").and_then(Value::as_str) == Some("aborted");
+            route_log.push(json!({
+                "step": step.id,
+                "route": if aborted { "abort" } else { "repair" },
+                "reason": reason
+            }));
+            write_replay_run_log_update(
+                run_log_path.as_deref(),
+                name,
+                if aborted { "aborted" } else { "failed" },
+                &route_log,
+            );
+            if aborted {
+                return (
+                    json!({
+                        "status": "aborted",
+                        "message": "Replay aborted by user",
+                        "detail": body,
+                        "step": step.id,
+                        "intent": step.intent,
+                        "routes": route_log
+                    }),
+                    200,
+                );
+            }
             return (
                 json!({
                     "status": "failed",
-                    "error": body
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("step replay failed"),
+                    "error": reason,
                     "detail": body,
                     "step": step.id,
-                    "intent": step.intent
+                    "intent": step.intent,
+                    "routes": route_log
                 }),
                 status,
             );
         }
         replayed_steps += 1;
+        write_replay_run_log_update(run_log_path.as_deref(), name, "running", &route_log);
     }
 
+    write_replay_run_log_update(run_log_path.as_deref(), name, "ok", &route_log);
     (
         json!({
             "ok": true,
@@ -3102,6 +3658,57 @@ fn wait_for_ableton_execute_ready(
     Err(format!(
         "Timed out waiting for Ableton execute-v3 bridge readiness: {last_message}"
     ))
+}
+
+fn replay_run_log_path(workflow: &str) -> Option<PathBuf> {
+    let runs_dir = vault_workflows_dir()
+        .parent()
+        .map(|path| path.join("runs"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Dave\AppData\Local\Marouba\vault\runs"));
+    if let Err(error) = std::fs::create_dir_all(&runs_dir) {
+        write_debug_log(&format!("failed to create replay run log dir: {error}"));
+        return None;
+    }
+    let timestamp = current_unix_ms();
+    let safe_name = slugify(workflow);
+    Some(runs_dir.join(format!("run_{timestamp}_{safe_name}.json")))
+}
+
+fn write_replay_run_log_update(
+    path: Option<&Path>,
+    workflow: &str,
+    status: &str,
+    routes: &[Value],
+) {
+    if let Some(path) = path {
+        write_replay_run_log_to_path(path, workflow, status, routes);
+    } else {
+        write_replay_run_log(workflow, status, routes);
+    }
+}
+
+fn write_replay_run_log(workflow: &str, status: &str, routes: &[Value]) {
+    if let Some(path) = replay_run_log_path(workflow) {
+        write_replay_run_log_to_path(&path, workflow, status, routes);
+    }
+}
+
+fn write_replay_run_log_to_path(path: &Path, workflow: &str, status: &str, routes: &[Value]) {
+    let timestamp = current_unix_ms();
+    let body = json!({
+        "workflow": workflow,
+        "status": status,
+        "timestamp_ms": timestamp,
+        "routes": routes
+    });
+    match serde_json::to_string_pretty(&body) {
+        Ok(text) => {
+            if let Err(error) = std::fs::write(&path, text) {
+                write_debug_log(&format!("failed to write replay run log: {error}"));
+            }
+        }
+        Err(error) => write_debug_log(&format!("failed to encode replay run log: {error}")),
+    }
 }
 
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {
@@ -5551,16 +6158,10 @@ fn write_workflow(
     let id = slugify(name);
     let today = current_date_string();
     let app = workflow_app_from_events(events);
-    let events_json = serde_json::to_string_pretty(events).map_err(|error| error.to_string())?;
     let steps = compile_v2_steps(events);
     let steps_markdown = workflow_steps_markdown(&steps)?;
-    let routes_json = format!(
-        "[\n  {{\n    \"type\": \"gesture\",\n    \"events\": {},\n    \"target_window\": {}\n  }}\n]",
-        indent_json_value(&events_json, 4),
-        yaml_scalar(&app),
-    );
 
-    let body = format!(
+    let human_body = format!(
         "---\n\
 vault_spec_version: 3\n\
 id: {}\n\
@@ -5575,13 +6176,12 @@ last_verified: {}\n\
 compat:\n\
   legacy_gesture_routes: true\n\
 source: self_taught\n\
-routes: {}\n\
 fallback_order: [gesture, ask]\n\
 verification: {{\"type\":\"none\"}}\n\
 calls: []\n\
 depends_on: []\n\
 ---\n\n\
-# {}\n\n{}\n\n## Steps\n\n{}\n\nCaptured raw event stream is stored in step routes and in the compatibility gesture route.\n",
+# {}\n\n{}\n\nIntent-only workflow view. Engine steps live in {}.\n",
         yaml_scalar(&id),
         yaml_scalar(name),
         yaml_scalar(&app),
@@ -5589,15 +6189,19 @@ depends_on: []\n\
         serde_json::to_string(&metadata.tags).unwrap_or_else(|_| "[]".to_string()),
         today,
         today,
-        routes_json.replace('\n', "\n  "),
         name,
         metadata.description,
-        steps_markdown,
+        format!("{id}.steps.md"),
     );
     let dir = vault_workflows_dir();
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join(format!("{id}.md"));
-    std::fs::write(&path, body).map_err(|error| error.to_string())?;
+    std::fs::write(&path, human_body).map_err(|error| error.to_string())?;
+    let steps_path = steps_sidecar_path(&path);
+    std::fs::write(&steps_path, format!("## Steps\n\n{}\n", steps_markdown))
+        .map_err(|error| error.to_string())?;
+    hide_steps_sidecar(&steps_path);
+    regenerate_vault_index_and_graph()?;
     Ok(path)
 }
 
@@ -5620,14 +6224,78 @@ fn compile_v2_steps(events: &[RecordedEvent]) -> Vec<Value> {
             }
         }
         if events[index].kind == "mousedown" {
-            if let Some(device_name) = ableton_device_name(&events[index]) {
+            if ableton_load_payload_name(&events[index]).is_none() {
                 if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
-                    let segment = events[index..=up_index].to_vec();
+                let segment = events[index..=up_index].to_vec();
+                if let Some(verified_name) = verified_lom_device_load_name(&segment) {
                     flush_gesture_step(&mut steps, &mut gesture_buffer);
                     steps.push(load_device_step_value(
                         steps.len() + 1,
                         &segment,
-                        &device_name,
+                        &verified_name,
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+                }
+            }
+            if let Some(payload_name) = ableton_load_payload_name(&events[index]) {
+                if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                    let segment = events[index..=up_index].to_vec();
+                    flush_gesture_step(&mut steps, &mut gesture_buffer);
+                    steps.push(load_payload_capture_gap_step_value(
+                        steps.len() + 1,
+                        &segment,
+                        &payload_name,
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+            }
+            if let Some(device_name) = ableton_device_name(&events[index]) {
+                if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                    let segment = events[index..=up_index].to_vec();
+                    flush_gesture_step(&mut steps, &mut gesture_buffer);
+                    if let Some(verified_name) = verified_lom_device_load_name(&segment) {
+                        steps.push(load_device_step_value(
+                            steps.len() + 1,
+                            &segment,
+                            &verified_name,
+                        ));
+                    } else {
+                        steps.push(load_device_capture_gap_step_value(
+                            steps.len() + 1,
+                            &segment,
+                            &device_name,
+                        ));
+                    }
+                    index = up_index + 1;
+                    continue;
+                }
+            }
+            if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                let segment = events[index..=up_index].to_vec();
+                if segment_has_semantic(&segment, "lom_snapshot_unavailable") {
+                    let source_name = segment
+                        .iter()
+                        .find_map(|event| {
+                            event
+                                .element_name
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|name| {
+                                    !name.is_empty()
+                                        && !name.to_ascii_lowercase().contains("in track ")
+                                        && !name.eq_ignore_ascii_case("slots")
+                                })
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "unknown Ableton load".to_string());
+                    flush_gesture_step(&mut steps, &mut gesture_buffer);
+                    steps.push(load_device_capture_gap_step_value(
+                        steps.len() + 1,
+                        &segment,
+                        &source_name,
                     ));
                     index = up_index + 1;
                     continue;
@@ -5698,6 +6366,55 @@ fn midi_event_pitch(event: &RecordedEvent) -> Option<u8> {
     event
         .midi_pitch
         .or_else(|| event.note.as_deref().and_then(midi_pitch_from_note_name))
+}
+
+fn ableton_load_payload_name(event: &RecordedEvent) -> Option<String> {
+    if !is_ableton_event(event) {
+        return None;
+    }
+    let name = event.element_name.as_deref()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let looks_like_payload = [".adg", ".adv", ".als", ".alc", ".alp", ".wav", ".aif", ".aiff", ".mp3"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix));
+    looks_like_payload.then(|| name.to_string())
+}
+
+fn verified_lom_device_load_name(segment: &[RecordedEvent]) -> Option<String> {
+    segment.iter().find_map(|event| {
+        let source_is_lom = event
+            .parameter_value_capture_method
+            .as_deref()
+            .map(|value| value == "ableton_lom")
+            .unwrap_or(false)
+            || event
+                .midi_source
+                .as_deref()
+                .map(|value| value == "ableton_lom")
+                .unwrap_or(false);
+        let marks_load = event.api_param.as_deref() == Some("load_device")
+            || event
+                .semantic
+                .as_deref()
+                .map(|semantic| semantic.contains("lom_device_loaded"))
+                .unwrap_or(false);
+        (source_is_lom && marks_load)
+            .then(|| event.api_device.clone().or_else(|| event.element_name.clone()))
+            .flatten()
+    })
+}
+
+fn segment_has_semantic(segment: &[RecordedEvent], needle: &str) -> bool {
+    segment.iter().any(|event| {
+        event
+            .semantic
+            .as_deref()
+            .map(|semantic| semantic.contains(needle))
+            .unwrap_or(false)
+    })
 }
 
 fn flush_gesture_step(steps: &mut Vec<Value>, gesture_buffer: &mut Vec<RecordedEvent>) {
@@ -5819,7 +6536,53 @@ fn load_device_step_value(
         .and_then(|event| event.window_title.clone())
         .or_else(|| up.and_then(|event| event.window_title.clone()))
         .unwrap_or_default();
-    let track = down
+    let verified_event = segment.iter().find(|event| {
+        event.parameter_value_capture_method.as_deref() == Some("ableton_lom")
+            && event.api_param.as_deref() == Some("load_device")
+    });
+    let target_parts = verified_event
+        .and_then(|event| event.api_target.as_deref())
+        .map(parse_ableton_target_parts)
+        .unwrap_or_default();
+    let verified_snapshot = verified_event
+        .and_then(|event| event.parameter_value_raw.as_deref())
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let track = target_parts
+        .get("track_name")
+        .cloned()
+        .or_else(|| {
+            down.zip(up)
+                .and_then(|(down, up)| ableton_target_channel_for_device_drag(down, up))
+        })
+        .unwrap_or_else(|| "selected track".to_string());
+    let track_id = target_parts
+        .get("track_id")
+        .cloned()
+        .unwrap_or_else(|| "selected".to_string());
+    let track_index = target_parts
+        .get("track_index")
+        .and_then(|value| value.parse::<i64>().ok());
+    let device_index = target_parts
+        .get("device_index")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let device_class = verified_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("class_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let parameter_snapshot = verified_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("parameters"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let track_target = format!(
+        "track_id:{track_id}/track_index:{}/device_index:{device_index}/device:{device_name}",
+        track_index
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "selected".to_string())
+    );
+    let legacy_track = down
         .zip(up)
         .and_then(|(down, up)| ableton_target_channel_for_device_drag(down, up))
         .unwrap_or_else(|| "selected track".to_string());
@@ -5835,9 +6598,13 @@ fn load_device_step_value(
         "target": {
             "app": app,
             "window_title": window_title,
-            "track": track,
+            "track_id": track_id,
+            "track_index": track_index,
+            "track_name": track,
+            "track": legacy_track,
             "device": device_name,
-            "device_slot": 0,
+            "device_class": device_class,
+            "device_slot": device_index,
             "replacement_semantics": "replace_or_insert_at_recorded_slot"
         },
         "value": {
@@ -5845,8 +6612,10 @@ fn load_device_step_value(
             "browser_category": category,
             "preset_name": source_name,
             "preset_name_confidence": "uia_label",
-            "parameter_snapshot": [],
-            "snapshot_note": "No parameter snapshot captured for this legacy-inferred load; downstream set_parameter api steps remain authoritative."
+            "outcome_type": "device_loaded",
+            "outcome_verification": "lom_device_snapshot",
+            "parameter_snapshot": parameter_snapshot,
+            "snapshot_note": "Captured from Ableton LOM device snapshot; names are display metadata, track_id/track_index are replay anchors."
         },
         "signals": default_step_signals(),
         "routes": [
@@ -5856,11 +6625,15 @@ fn load_device_step_value(
                 "action": "load_device",
                 "name": device_name,
                 "device": device_name,
-                "track": track,
-                "target_index": 0,
+                "track": legacy_track,
+                "track_id": track_id,
+                "track_index": track_index,
+                "track_name": track,
+                "target": track_target,
+                "target_index": device_index,
                 "replace": true,
                 "source": "ableton_lom",
-                "parameter_snapshot": []
+                "parameter_snapshot": parameter_snapshot
             },
             {
                 "type": "gesture",
@@ -5868,6 +6641,210 @@ fn load_device_step_value(
             }
         ]
     })
+}
+
+fn parse_ableton_target_parts(target: &str) -> std::collections::BTreeMap<String, String> {
+    target
+        .split('/')
+        .filter_map(|part| part.split_once(':'))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect()
+}
+
+fn load_device_capture_gap_step_value(
+    step_number: usize,
+    segment: &[RecordedEvent],
+    ui_label: &str,
+) -> Value {
+    let down = segment.first();
+    let up = segment.last();
+    let app = down
+        .and_then(|event| event.app_name.clone())
+        .or_else(|| up.and_then(|event| event.app_name.clone()))
+        .unwrap_or_else(|| "Ableton Live".to_string());
+    let window_title = down
+        .and_then(|event| event.window_title.clone())
+        .or_else(|| up.and_then(|event| event.window_title.clone()))
+        .unwrap_or_default();
+    let track = down
+        .zip(up)
+        .and_then(|(down, up)| ableton_target_channel_for_device_drag(down, up))
+        .unwrap_or_else(|| "selected track".to_string());
+    let source_name = down
+        .and_then(|event| event.element_name.clone())
+        .unwrap_or_else(|| ui_label.to_string());
+    let category = ableton_browser_category_for_device(ui_label).unwrap_or("unknown");
+    let snapshot_unavailable = segment.iter().any(|event| {
+        event
+            .semantic
+            .as_deref()
+            .map(|semantic| semantic.contains("lom_snapshot_unavailable"))
+            .unwrap_or(false)
+    });
+    let snapshot_no_diff = segment.iter().any(|event| {
+        event
+            .semantic
+            .as_deref()
+            .map(|semantic| semantic.contains("lom_snapshot_no_diff"))
+            .unwrap_or(false)
+    });
+    let capture_gap = if snapshot_unavailable {
+        "snapshot_unavailable"
+    } else {
+        "ableton_load_payload_unverified"
+    };
+    let reason = if snapshot_unavailable {
+        "LOM device snapshot was unavailable during capture, so Marouba could not verify whether a device was loaded. CAPTURE MUST NEVER WRITE A WRONG FACT, so no api load route was emitted."
+    } else if snapshot_no_diff {
+        "LOM device snapshots were available before and after the gesture, but no device-list diff was detected. CAPTURE MUST NEVER WRITE A WRONG FACT, so no api load route was emitted."
+    } else {
+        "No LOM device diff verified the loaded device/preset. CAPTURE MUST NEVER WRITE A WRONG FACT, so no api load route was emitted."
+    };
+
+    json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "capture_gap",
+        "intent": format!("Unverified Ableton load gesture for {source_name}."),
+        "target": {
+            "app": app,
+            "window_title": window_title,
+            "track": track,
+            "ui_label": source_name,
+            "browser_category": category
+        },
+        "value": {
+            "capture_gap": capture_gap,
+            "reason": reason,
+            "readable_metadata": {
+                "browser_item_text": source_name,
+                "candidate_device_name": ui_label
+            }
+        },
+        "signals": default_step_signals(),
+        "routes": [
+            {
+                "type": "gesture",
+                "trust": "unknown_payload",
+                "events": segment
+            }
+        ]
+    })
+}
+
+fn load_payload_capture_gap_step_value(
+    step_number: usize,
+    segment: &[RecordedEvent],
+    payload_name: &str,
+) -> Value {
+    let down = segment.first();
+    let up = segment.last();
+    let app = down
+        .and_then(|event| event.app_name.clone())
+        .or_else(|| up.and_then(|event| event.app_name.clone()))
+        .unwrap_or_else(|| "Ableton Live".to_string());
+    let window_title = down
+        .and_then(|event| event.window_title.clone())
+        .or_else(|| up.and_then(|event| event.window_title.clone()))
+        .unwrap_or_default();
+    let track = down
+        .zip(up)
+        .and_then(|(down, up)| ableton_target_channel_for_device_drag(down, up))
+        .unwrap_or_else(|| "selected track".to_string());
+    let extension = payload_name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    let drop_target_context = ableton_drop_target_context(segment);
+    let replay_capability = ableton_payload_replay_capability(&drop_target_context, &extension);
+    let sample_path = ableton_sample_path_from_payload(payload_name);
+
+    json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "capture_gap",
+        "intent": format!("Unverified Ableton payload load for {payload_name}."),
+        "target": {
+            "app": app,
+            "window_title": window_title,
+            "track": track,
+            "payload_name": payload_name,
+            "payload_extension": extension,
+            "drop_target_context": drop_target_context
+        },
+        "value": {
+            "capture_gap": "ableton_load_payload_unverified",
+            "reason": "Readable payload was captured, but no reconstructable api route exists yet. Goal-14 must capture browser path/payload dependencies before replay can use this semantically.",
+            "sample_path": sample_path,
+            "sample_path_confidence": "unknown",
+            "drop_target_context": drop_target_context,
+            "replay_capability": replay_capability,
+            "outcome_verification": "pending_lom_outcome",
+            "live_preference_state": "not_readable_from_current_bridge",
+            "readable_metadata": {
+                "browser_item_text": payload_name,
+                "filename": payload_name,
+                "extension": extension
+            }
+        },
+        "signals": default_step_signals(),
+        "routes": [
+            {
+                "type": "gesture",
+                "trust": "unknown_payload",
+                "events": segment
+            }
+        ]
+    })
+}
+
+fn ableton_sample_path_from_payload(_: &str) -> Value {
+    Value::Null
+}
+
+fn ableton_payload_replay_capability(drop_target_context: &str, extension: &str) -> &'static str {
+    let audio_file = matches!(extension, "wav" | "aif" | "aiff" | "mp3");
+    match (audio_file, drop_target_context) {
+        (true, "clip_slot") => "lom_clip_slot_create_audio_clip_when_absolute_path_known",
+        (true, "arrangement_or_track_free_space") => {
+            "lom_track_create_audio_clip_when_absolute_path_known"
+        }
+        (true, "device_or_pad") => "capture_gap_until_sampler_payload_loader_exists",
+        _ => "capture_gap_until_payload_replay_route_exists",
+    }
+}
+
+fn ableton_drop_target_context(segment: &[RecordedEvent]) -> &'static str {
+    let names: Vec<String> = segment
+        .iter()
+        .filter_map(|event| event.element_name.as_deref())
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let semantics: Vec<String> = segment
+        .iter()
+        .filter_map(|event| event.semantic.as_deref())
+        .map(|semantic| semantic.to_ascii_lowercase())
+        .collect();
+    if names
+        .iter()
+        .any(|name| name.contains("clip") || name.contains("scene "))
+    {
+        return "clip_slot";
+    }
+    if names
+        .iter()
+        .any(|name| name.contains("simpler") || name.contains("drum pad") || name.contains("device"))
+    {
+        return "device_or_pad";
+    }
+    if names
+        .iter()
+        .any(|name| name == "slots" || name.contains("track title bar"))
+        || semantics
+            .iter()
+            .any(|semantic| semantic.contains("channel:"))
+    {
+        return "arrangement_or_track_free_space";
+    }
+    "unknown"
 }
 
 fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value {
@@ -6098,6 +7075,8 @@ mod tests {
                     health_port: 12002,
                 },
             ))),
+            replaying: false,
+            replay_abort: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -6320,6 +7299,346 @@ mod tests {
                 .map(Vec::len),
             Some(3)
         );
+    }
+
+    #[test]
+    fn unverified_ableton_device_drag_compiles_to_capture_gap_not_api() {
+        let mut down = ableton_test_event("Analog", Some("device:Analog"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert!(routes
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("capture_gap"))
+                .and_then(Value::as_str),
+            Some("ableton_load_payload_unverified")
+        );
+    }
+
+    #[test]
+    fn unavailable_ableton_snapshot_compiles_to_distinct_capture_gap() {
+        let mut down = ableton_test_event("Analog", Some("device:Analog;lom_snapshot_unavailable"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("capture_gap"))
+                .and_then(Value::as_str),
+            Some("snapshot_unavailable")
+        );
+        assert!(steps[0]
+            .get("value")
+            .and_then(|value| value.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("snapshot was unavailable"));
+    }
+
+    #[test]
+    fn unavailable_ableton_snapshot_without_source_name_still_compiles_to_gap() {
+        let mut down = ableton_test_event("in track Drums, scene 8", Some("channel:Drums"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = ableton_test_event(
+            "in track Drums, scene 7",
+            Some("channel:Drums;lom_snapshot_unavailable"),
+        );
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.button = Some("left".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("capture_gap"))
+                .and_then(Value::as_str),
+            Some("snapshot_unavailable")
+        );
+    }
+
+    #[test]
+    fn ableton_adg_payload_compiles_to_dedicated_capture_gap() {
+        let mut down = ableton_test_event("Chicago Kit.adg", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.element_name = Some("Slots".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("readable_metadata"))
+                .and_then(|metadata| metadata.get("filename"))
+                .and_then(Value::as_str),
+            Some("Chicago Kit.adg")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("drop_target_context"))
+                .and_then(Value::as_str),
+            Some("arrangement_or_track_free_space")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert!(routes
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+    }
+
+    #[test]
+    fn ableton_audio_payload_gap_records_drop_context_and_unknown_path() {
+        let mut down = ableton_test_event("Chimes Finger Down.aif", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = ableton_test_event("Slots", Some("lom_snapshot_no_diff"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.button = Some("left".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("drop_target_context"))
+                .and_then(Value::as_str),
+            Some("arrangement_or_track_free_space")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path")),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path_confidence"))
+                .and_then(Value::as_str),
+            Some("unknown")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("replay_capability"))
+                .and_then(Value::as_str),
+            Some("lom_track_create_audio_clip_when_absolute_path_known")
+        );
+    }
+
+    #[test]
+    fn ableton_adg_payload_remains_capture_gap_even_when_lom_diff_exists() {
+        let mut down = ableton_test_event("Chicago Kit.adg", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.element_name = Some("in track Drums, scene 5".to_string());
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_param = Some("load_device".to_string());
+        up.api_device = Some("Drum Rack".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert!(routes
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+    }
+
+    #[test]
+    fn verified_lom_device_load_may_compile_to_api_route() {
+        let mut down = ableton_test_event("Analog", Some("device:Analog;lom_device_loaded"));
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        down.parameter_value_capture_method = Some("ableton_lom".to_string());
+        down.api_param = Some("load_device".to_string());
+        down.api_device = Some("Analog".to_string());
+        let mut up = down.clone();
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("load_device")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("outcome_type"))
+                .and_then(Value::as_str),
+            Some("device_loaded")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("outcome_verification"))
+                .and_then(Value::as_str),
+            Some("lom_device_snapshot")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(
+            routes[0].get("source").and_then(Value::as_str),
+            Some("ableton_lom")
+        );
+    }
+
+    #[test]
+    fn verified_lom_device_load_compiles_when_source_name_missing() {
+        let mut down = ableton_test_event("", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        down.element_name = None;
+        let mut up = ableton_test_event("in track Drums, scene 5", Some("channel:Drums;lom_device_loaded:Analog"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_300;
+        up.button = Some("left".to_string());
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_param = Some("load_device".to_string());
+        up.api_device = Some("Analog".to_string());
+        up.api_target = Some(
+            "track_id:lom:1234/track_index:0/track_name:Drums/device_index:1/device:Analog"
+                .to_string(),
+        );
+        up.parameter_value_raw = Some(json!({
+            "index": 1,
+            "id": "lom:device:777",
+            "name": "Analog",
+            "class_name": "OriginalSimpler",
+            "parameters": [
+                {"name": "F1 Freq", "display_value": "2.1 kHz", "normalized": 0.6428}
+            ]
+        }).to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("load_device")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("track_id"))
+                .and_then(Value::as_str),
+            Some("lom:1234")
+        );
+        let snapshot = steps[0]
+            .get("value")
+            .and_then(|value| value.get("parameter_snapshot"))
+            .and_then(Value::as_array)
+            .expect("parameter snapshot");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            steps[0]
+                .get("routes")
+                .and_then(Value::as_array)
+                .and_then(|routes| routes[0].get("parameter_snapshot"))
+                .and_then(Value::as_array)
+                .map(|items| items.len()),
+            Some(1)
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert_eq!(
+            routes[0].get("track_id").and_then(Value::as_str),
+            Some("lom:1234")
+        );
+    }
+
+    #[test]
+    fn detected_loaded_device_uses_lom_before_after_diff() {
+        let before = json!({
+            "devices": [
+                {"name": "Drum Rack", "class_name": "DrumRackDevice"}
+            ]
+        });
+        let after = json!({
+            "devices": [
+                {"name": "Analog", "class_name": "OriginalSimpler"}
+            ]
+        });
+
+        let loaded = detected_loaded_device(&before, &after).expect("loaded device");
+
+        assert_eq!(loaded.get("name").and_then(Value::as_str), Some("Analog"));
     }
 
     #[test]

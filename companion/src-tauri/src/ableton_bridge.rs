@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Method, Response, Server, StatusCode};
 
 const DEFAULT_OSC_HOST: &str = "127.0.0.1";
@@ -33,6 +33,10 @@ pub(crate) struct AbletonBridgeHealth {
 pub(crate) struct AbletonParameterSnapshot {
     pub(crate) target: String,
     pub(crate) track: String,
+    #[serde(default)]
+    pub(crate) track_id: Option<String>,
+    #[serde(default)]
+    pub(crate) track_index: Option<i64>,
     pub(crate) device: String,
     pub(crate) parameter: String,
     pub(crate) normalized_value: f64,
@@ -391,6 +395,8 @@ impl OscHealthProbe {
         })?;
         Ok(AbletonParameterSnapshot {
             track: args[1].clone(),
+            track_id: args.get(7).cloned().filter(|value| !value.is_empty()),
+            track_index: args.get(8).and_then(|value| value.parse::<i64>().ok()),
             device: args[2].clone(),
             parameter: args[3].clone(),
             display_value: args[4].clone(),
@@ -515,12 +521,35 @@ impl OscHealthProbe {
             )
             .map_err(|error| format!("failed to send OSC {address}: {error}"))?;
 
-        let mut buffer = [0u8; 4096];
-        let (len, _) = self
-            .socket
-            .recv_from(&mut buffer)
-            .map_err(|error| format!("Live Remote Script did not answer: {error}"))?;
-        decode_osc_message(&buffer[..len])
+        let deadline = Instant::now() + Duration::from_millis(1_600);
+        let mut stale = Vec::<String>::new();
+        loop {
+            let mut buffer = [0u8; 65_535];
+            let (len, _) = self
+                .socket
+                .recv_from(&mut buffer)
+                .map_err(|error| {
+                    if stale.is_empty() {
+                        format!("Live Remote Script did not answer {address}: {error}")
+                    } else {
+                        format!(
+                            "Live Remote Script did not answer {address}; discarded stale replies: {}",
+                            stale.join(", ")
+                        )
+                    }
+                })?;
+            let decoded = decode_osc_message(&buffer[..len])?;
+            if decoded.0 == address {
+                return Ok(decoded);
+            }
+            stale.push(decoded.0);
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Live Remote Script did not answer {address}; discarded stale replies: {}",
+                    stale.join(", ")
+                ));
+            }
+        }
     }
 }
 

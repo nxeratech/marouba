@@ -25,9 +25,13 @@ class Vault:
         self.root = Path(root) if root else Path(__file__).resolve().parents[1]
         self.vault_dir = self.root / "vault"
         self.workflows_dir = self.vault_dir / "workflows"
+        self.elements_dir = self.vault_dir / "elements"
         self.runs_dir = self.vault_dir / "runs"
+        self.signals_dir = self.vault_dir / "signals"
         self.workflows_dir.mkdir(parents=True, exist_ok=True)
+        self.elements_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.signals_dir.mkdir(parents=True, exist_ok=True)
 
     def load_workflow(self, path_or_id: str | Path) -> dict[str, Any]:
         path = Path(path_or_id)
@@ -39,29 +43,44 @@ class Vault:
 
         post = frontmatter.load(path)
         data = dict(post.metadata)
-        data["body"] = post.content
+        sidecar = steps_sidecar_path(path)
+        sidecar_body = sidecar.read_text(encoding="utf-8") if sidecar.exists() else ""
+        data["body"] = post.content if not sidecar_body else f"{post.content.rstrip()}\n\n{sidecar_body}".strip() + "\n"
         data["_path"] = str(path)
         version = validate_vault_spec_version(data.get("vault_spec_version"))
         data["vault_spec_version"] = version
         normalize_gesture_routes(data)
-        steps = parse_workflow_steps(post.content)
+        steps = parse_workflow_steps(sidecar_body or post.content)
         if steps:
             data["steps"] = normalize_steps(steps, version)
+            if "routes" not in data and data["steps"]:
+                first_routes = data["steps"][0].get("routes")
+                if isinstance(first_routes, list):
+                    data["routes"] = first_routes
         return data
 
     def save_workflow(self, workflow: dict[str, Any], filename: str | None = None) -> Path:
         data = dict(workflow)
         body = str(data.pop("body", "") or "")
         data.pop("_path", None)
-        data.pop("steps", None)
+        steps = data.pop("steps", None)
         workflow_id = data.get("id")
         if not filename:
             if not workflow_id:
                 raise ValueError("Workflow must include an id when filename is omitted")
             filename = f"{sanitize_workflow_id(str(workflow_id))}.md"
         path = self.workflows_dir / filename
-        post = frontmatter.Post(body, **data)
+        human_body, steps_body = split_human_and_steps_body(body)
+        if steps:
+            steps_body = write_workflow_steps_markdown(normalize_steps(steps, int(data.get("vault_spec_version") or 1)))
+        post = frontmatter.Post(human_body, **data)
         path.write_text(frontmatter.dumps(post), encoding="utf-8")
+        sidecar = steps_sidecar_path(path)
+        if steps_body.strip():
+            sidecar.write_text(steps_body, encoding="utf-8")
+        elif sidecar.exists():
+            sidecar.unlink()
+        self.regenerate_index_and_graph()
         return path
 
     def migrate_workflow_to_v3(self, path_or_id: str | Path, filename: str | None = None) -> Path:
@@ -81,12 +100,16 @@ class Vault:
     def list_workflows(self) -> list[dict[str, Any]]:
         workflows = []
         for path in sorted(self.workflows_dir.glob("*.md")):
+            if is_steps_sidecar(path):
+                continue
             workflows.append(self.load_workflow(path))
         return workflows
 
     def list_vaults(self) -> list[dict[str, Any]]:
         workflows = []
         for path in sorted(self.workflows_dir.rglob("*.md")):
+            if is_steps_sidecar(path):
+                continue
             workflow = self.load_workflow(path)
             workflows.append(
                 {
@@ -122,12 +145,117 @@ class Vault:
             "result": result,
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        self.regenerate_index_and_graph()
         return path
+
+    def regenerate_index_and_graph(self) -> None:
+        workflows = []
+        for path in sorted(self.workflows_dir.glob("*.md")):
+            if is_steps_sidecar(path):
+                continue
+            try:
+                workflow = self.load_workflow(path)
+            except Exception:
+                continue
+            workflows.append((path, workflow))
+
+        lines = []
+        nodes = []
+        links = []
+        element_paths: dict[str, Path] = {}
+        run_nodes = []
+        for path, workflow in workflows:
+            workflow_id = str(workflow.get("id") or path.stem)
+            app = str(workflow.get("app") or "Unknown")
+            tags = workflow.get("tags") or []
+            if not isinstance(tags, list):
+                tags = [str(tags)]
+            intent = one_line_intent(workflow)
+            line = bounded_index_line(workflow_id, app, tags, intent)
+            lines.append(line)
+            nodes.append(
+                {
+                    "id": f"workflow:{workflow_id}",
+                    "type": "workflow",
+                    "path": slash_path(path.relative_to(self.vault_dir)),
+                    "steps_path": slash_path(steps_sidecar_path(path).relative_to(self.vault_dir)),
+                    "app": app,
+                    "tags": tags,
+                    "intent": intent,
+                }
+            )
+            for element in [app, *tags]:
+                if not str(element).strip():
+                    continue
+                element_id = f"element:{slugify_element(str(element))}"
+                element_path = self.elements_dir / f"{slugify_element(str(element))}.md"
+                element_paths[element_id] = element_path
+                links.append({"from": f"workflow:{workflow_id}", "to": element_id, "type": "uses"})
+            for run_path in sorted(self.runs_dir.glob(f"*-{workflow_id}.json")):
+                run_id = f"run:{run_path.stem}"
+                run_nodes.append({"id": run_id, "type": "run", "path": slash_path(run_path.relative_to(self.vault_dir))})
+                links.append({"from": f"workflow:{workflow_id}", "to": run_id, "type": "ran"})
+
+        for element_id, element_path in sorted(element_paths.items()):
+            label = element_id.split(":", 1)[1]
+            element_path.write_text(f"# {label}\n", encoding="utf-8")
+            nodes.append({"id": element_id, "type": "element", "path": slash_path(element_path.relative_to(self.vault_dir))})
+        nodes.extend(run_nodes)
+        self.vault_dir.mkdir(parents=True, exist_ok=True)
+        (self.vault_dir / "index.md").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        (self.vault_dir / "graph.json").write_text(
+            json.dumps({"nodes": nodes, "links": links}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 def sanitize_workflow_id(workflow_id: str) -> str:
     sanitized = re.sub(r"[^a-z0-9\-_]", "", workflow_id.casefold())
     return sanitized or "workflow"
+
+
+def is_steps_sidecar(path: Path) -> bool:
+    return path.name.endswith(".steps.md")
+
+
+def steps_sidecar_path(path: Path) -> Path:
+    if is_steps_sidecar(path):
+        return path
+    return path.with_name(f"{path.stem}.steps.md")
+
+
+def split_human_and_steps_body(body: str) -> tuple[str, str]:
+    match = re.search(r"(?m)^## Steps\b", body)
+    if not match:
+        return body, ""
+    return body[: match.start()].rstrip() + "\n", body[match.start() :].strip() + "\n"
+
+
+def one_line_intent(workflow: dict[str, Any]) -> str:
+    description = str(workflow.get("description") or "").strip()
+    if description:
+        return " ".join(description.split())
+    body = re.sub(r"```.*?```", "", str(workflow.get("body") or ""), flags=re.S)
+    body = re.sub(r"#+\s*", "", body)
+    return " ".join(body.split())[:160] or "Replay recorded workflow."
+
+
+def bounded_index_line(workflow_id: str, app: str, tags: list[Any], intent: str) -> str:
+    tags_text = ",".join(str(tag) for tag in tags[:4]) or "-"
+    prefix = f"[[workflows/{workflow_id}|{workflow_id}]] · {app} · {tags_text} ·"
+    words = intent.split()
+    while words and len(f"{prefix} {' '.join(words)}".split()) > 40:
+        words.pop()
+    return f"{prefix} {' '.join(words) if words else intent.split()[0] if intent.split() else 'workflow'}"
+
+
+def slugify_element(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9\-_]+", "-", value.casefold()).strip("-")
+    return slug or "element"
+
+
+def slash_path(path: Path) -> str:
+    return path.as_posix()
 
 
 def validate_vault_spec_version(value: Any) -> int:
