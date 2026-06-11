@@ -67,11 +67,13 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, SetCursorPos,
-    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, MessageBoxW, SetCursorPos,
+    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT,
+    MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
+
+const COMPANION_HTTP_ADDR: &str = "127.0.0.1:7842";
 
 #[derive(Clone, Debug)]
 struct AppState {
@@ -231,7 +233,22 @@ fn main() {
     }));
 
     let api_state = state.clone();
-    thread::spawn(move || start_http_api(token, api_state));
+    let (api_ready_tx, api_ready_rx) = mpsc::channel();
+    thread::spawn(move || start_http_api(token, api_state, api_ready_tx));
+    match api_ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            show_startup_message("Marouba is already running", &error);
+            return;
+        }
+        Err(_) => {
+            show_startup_message(
+                "Marouba startup failed",
+                "The local companion API did not become ready within 5 seconds.",
+            );
+            return;
+        }
+    }
 
     tauri::Builder::default()
         .manage(state)
@@ -253,6 +270,24 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Marouba Companion");
+}
+
+fn show_startup_message(title: &str, body: &str) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let body: Vec<u16> = body.encode_utf16().chain(Some(0)).collect();
+        let _ = MessageBoxW(
+            HWND(std::ptr::null_mut()),
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!("{title}: {body}");
+    }
 }
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
@@ -498,7 +533,7 @@ fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
             ableton_bridge: guard
                 .ableton_bridge
                 .lock()
-                .map(|mut bridge| bridge.health_check())
+                .map(|mut bridge| bridge.status_without_spawn())
                 .unwrap_or_else(|_| AbletonBridgeHealth::unavailable("bridge state unavailable")),
         },
         Err(_) => RecordingStatus {
@@ -556,11 +591,7 @@ fn set_keyboard_hook_sender(sender: Option<mpsc::Sender<KeyboardHookEvent>>) {
 }
 
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn keyboard_hook_proc(
-    code: i32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let kind = match wparam.0 as u32 {
             WM_KEYDOWN | WM_SYSKEYDOWN => Some("keydown"),
@@ -682,13 +713,13 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     key: None,
                     note: None,
                     velocity: None,
-        midi_pitch: None,
-        midi_channel: None,
-        midi_start_beats: None,
-        midi_duration_beats: None,
-        midi_tempo: None,
-        midi_source: None,
-        midi_note_id: None,
+                    midi_pitch: None,
+                    midi_channel: None,
+                    midi_start_beats: None,
+                    midi_duration_beats: None,
+                    midi_tempo: None,
+                    midi_source: None,
+                    midi_note_id: None,
                     window_title: Some(window.title.clone()),
                     app_name: Some(current_app_name.clone()),
                     window_rect: active_window_rect(),
@@ -1099,10 +1130,22 @@ fn midi_event_record(
         velocity: Some(event.velocity),
         midi_pitch: Some(event.pitch),
         midi_channel: Some(event.channel),
-        midi_start_beats: event.start_time.as_deref().and_then(|value| value.parse::<f64>().ok()),
-        midi_duration_beats: event.duration.as_deref().and_then(|value| value.parse::<f64>().ok()),
-        midi_tempo: event.tempo.as_deref().and_then(|value| value.parse::<f64>().ok()),
-        midi_source: event.source.clone().or_else(|| Some("lom_clip_notes".to_string())),
+        midi_start_beats: event
+            .start_time
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok()),
+        midi_duration_beats: event
+            .duration
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok()),
+        midi_tempo: event
+            .tempo
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok()),
+        midi_source: event
+            .source
+            .clone()
+            .or_else(|| Some("lom_clip_notes".to_string())),
         midi_note_id: event.note_id.clone(),
         window_title: Some(window.title.clone()),
         app_name: Some(app_name),
@@ -1361,12 +1404,16 @@ fn keyboard_event_record(
         key: Some(key_label),
         note: midi_note.clone(),
         velocity: midi_note.as_ref().map(|_| 100),
-        midi_pitch: midi_note.as_ref().and_then(|note| midi_pitch_from_note_name(note)),
+        midi_pitch: midi_note
+            .as_ref()
+            .and_then(|note| midi_pitch_from_note_name(note)),
         midi_channel: midi_note.as_ref().map(|_| 1),
         midi_start_beats: None,
         midi_duration_beats: None,
         midi_tempo: None,
-        midi_source: midi_note.as_ref().map(|_| "keyboard_activity_low_trust".to_string()),
+        midi_source: midi_note
+            .as_ref()
+            .map(|_| "keyboard_activity_low_trust".to_string()),
         midi_note_id: None,
         window_title: Some(window.title.clone()),
         app_name: Some(app_name),
@@ -1469,8 +1516,29 @@ fn ableton_computer_midi_note_for_vk(vk: i32) -> Option<String> {
     Some(note.to_string())
 }
 
-fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
-    let server = Server::http("127.0.0.1:7842").expect("failed to bind companion API");
+fn start_http_api(
+    token: String,
+    state: Arc<Mutex<AppState>>,
+    ready: mpsc::Sender<Result<(), String>>,
+) {
+    let server = match Server::http(COMPANION_HTTP_ADDR) {
+        Ok(server) => {
+            let _ = ready.send(Ok(()));
+            server
+        }
+        Err(error) => {
+            let detail = if error.to_string().to_ascii_lowercase().contains("access")
+                || error.to_string().to_ascii_lowercase().contains("use")
+                || error.to_string().to_ascii_lowercase().contains("bind")
+            {
+                format!("Marouba is already running on {COMPANION_HTTP_ADDR}.")
+            } else {
+                format!("Marouba could not start its local API on {COMPANION_HTTP_ADDR}: {error}")
+            };
+            let _ = ready.send(Err(detail));
+            return;
+        }
+    };
     for mut request in server.incoming_requests() {
         if request.method() == &Method::Options {
             let _ = request.respond(cors_response(json!({}), 204));
@@ -1483,7 +1551,17 @@ fn start_http_api(token: String, state: Arc<Mutex<AppState>>) {
         let method = request.method().clone();
         let url = request.url().to_string();
         let response = match (method, url.as_str()) {
-            (Method::Get, "/health") => json_response(json!({"status": "ok"}), 200),
+            (Method::Get, "/health") => json_response(
+                json!({
+                    "status": "ok",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "build": "workspace",
+                    "exe": std::env::current_exe()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                }),
+                200,
+            ),
             (Method::Get, "/ableton/health") => {
                 let health = ableton_bridge_from_state(&state)
                     .and_then(|bridge| bridge.lock().ok().map(|mut guard| guard.health_check()))
@@ -1640,7 +1718,10 @@ fn marouba_root_dir() -> PathBuf {
     PathBuf::from(r"C:\Share\Marouba")
 }
 
-fn start_replay_workflow(payload: ReplayWorkflowRequest, state: Arc<Mutex<AppState>>) -> (Value, u16) {
+fn start_replay_workflow(
+    payload: ReplayWorkflowRequest,
+    state: Arc<Mutex<AppState>>,
+) -> (Value, u16) {
     let name = match safe_workflow_name(&payload.name) {
         Ok(name) => name,
         Err(error) => return (json!({"status": "failed", "error": error}), 400),
@@ -2794,7 +2875,11 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     )
 }
 
-fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>, state: &Arc<Mutex<AppState>>) -> (Value, u16) {
+fn replay_v2_workflow(
+    name: &str,
+    steps: Vec<VaultReplayStep>,
+    state: &Arc<Mutex<AppState>>,
+) -> (Value, u16) {
     let all_events: Vec<RecordedEvent> = steps
         .iter()
         .filter_map(VaultReplayStep::gesture_events)
@@ -2826,6 +2911,21 @@ fn replay_v2_workflow(name: &str, steps: Vec<VaultReplayStep>, state: &Arc<Mutex
         }
     };
     thread::sleep(Duration::from_millis(500));
+    if target_windows
+        .iter()
+        .any(|window| window.to_ascii_lowercase().contains("ableton live"))
+    {
+        if let Err(error) = wait_for_ableton_execute_ready(state, Duration::from_secs(60)) {
+            return (
+                json!({
+                    "status": "failed",
+                    "error": error,
+                    "focused_window": focused_window
+                }),
+                200,
+            );
+        }
+    }
 
     let mut replayed_steps = 0usize;
     let mut route_log = Vec::new();
@@ -2943,6 +3043,32 @@ fn replay_api_step(
         .lock()
         .map_err(|_| "Ableton bridge lock poisoned".to_string())?;
     guard.execute(payload)
+}
+
+fn wait_for_ableton_execute_ready(
+    state: &Arc<Mutex<AppState>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut last_message = "Ableton bridge unavailable".to_string();
+    while started.elapsed() < timeout {
+        let health = ableton_bridge_from_state(state)
+            .ok_or_else(|| "Ableton bridge state unavailable".to_string())?
+            .lock()
+            .map_err(|_| "Ableton bridge lock poisoned".to_string())?
+            .health_check();
+        if health.status == "ok" {
+            write_debug_log("Ableton bridge ready: execute-v3 health ok");
+            return Ok(());
+        }
+        last_message = health
+            .message
+            .unwrap_or_else(|| "Ableton bridge unavailable".to_string());
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!(
+        "Timed out waiting for Ableton execute-v3 bridge readiness: {last_message}"
+    ))
 }
 
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {
@@ -5577,6 +5703,32 @@ fn midi_note_step_value(step_number: usize, on: &RecordedEvent, off: &RecordedEv
     let tempo = on.midi_tempo.unwrap_or(120.0);
     let note_id = on.midi_note_id.clone().unwrap_or_default();
 
+    let mut routes = Vec::new();
+    if capture_method == "ableton_midi" {
+        routes.push(json!({
+            "type": "api",
+            "api": "ableton_midi",
+            "target": "ableton:midi_input",
+            "action": "play_note",
+            "note": note,
+            "pitch": pitch,
+            "velocity": velocity,
+            "channel": channel,
+            "duration_ms": duration_ms,
+            "start_time": start_beats,
+            "duration": duration_beats,
+            "tempo": tempo,
+            "note_id": note_id,
+            "source": "lom_clip_notes",
+            "events": [on, off]
+        }));
+    }
+    routes.push(json!({
+        "type": "shortcut",
+        "trust": capture_method,
+        "events": [on, off]
+    }));
+
     json!({
         "id": format!("step_{step_number:03}"),
         "type": "play_midi_note",
@@ -5600,28 +5752,7 @@ fn midi_note_step_value(step_number: usize, on: &RecordedEvent, off: &RecordedEv
             "capture_method": capture_method
         },
         "signals": default_step_signals(),
-        "routes": [
-            {
-                "type": "api",
-                "api": "ableton_midi",
-                "target": "ableton:midi_input",
-                "action": "play_note",
-                "note": note,
-                "pitch": pitch,
-                "velocity": velocity,
-                "channel": channel,
-                "duration_ms": duration_ms,
-                "start_time": start_beats,
-                "duration": duration_beats,
-                "tempo": tempo,
-                "note_id": note_id,
-                "events": [on, off]
-            },
-            {
-                "type": "shortcut",
-                "events": [on, off]
-            }
-        ]
+        "routes": routes
     })
 }
 
@@ -5655,6 +5786,7 @@ fn parameter_step_value(step_number: usize, segment: &[RecordedEvent]) -> Value 
         routes.push(json!({
             "type": "api",
             "api": "ableton_lom",
+            "source": "ableton_lom",
             "target": up.and_then(|event| event.api_target.clone()).unwrap_or_default(),
             "device": up.and_then(|event| event.api_device.clone()).unwrap_or_default(),
             "param": up.and_then(|event| event.api_param.clone()).unwrap_or_else(|| element_name.clone()),
@@ -5982,13 +6114,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
-        midi_pitch: None,
-        midi_channel: None,
-        midi_start_beats: None,
-        midi_duration_beats: None,
-        midi_tempo: None,
-        midi_source: None,
-        midi_note_id: None,
+            midi_pitch: None,
+            midi_channel: None,
+            midi_start_beats: None,
+            midi_duration_beats: None,
+            midi_tempo: None,
+            midi_source: None,
+            midi_note_id: None,
             window_title: Some("Untitled - Ableton Live 12 Suite".to_string()),
             app_name: Some("Ableton Live".to_string()),
             window_rect: None,
@@ -6051,6 +6183,10 @@ mod tests {
         assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
         assert_eq!(
             routes[0].get("api").and_then(Value::as_str),
+            Some("ableton_lom")
+        );
+        assert_eq!(
+            routes[0].get("source").and_then(Value::as_str),
             Some("ableton_lom")
         );
         assert_eq!(routes[0].get("value").and_then(Value::as_f64), Some(0.73));
@@ -6213,6 +6349,33 @@ mod tests {
                 Some(40 + index as u64)
             );
         }
+    }
+
+    #[test]
+    fn low_trust_keyboard_notes_do_not_compile_to_api_routes() {
+        let mut on = midi_test_event("note_on", 60, 100, 1_000);
+        on.midi_source = Some("keyboard_activity_low_trust".to_string());
+        on.api_param = None;
+        on.api_target = None;
+        let mut off = midi_test_event("note_off", 60, 0, 1_120);
+        off.midi_source = Some("keyboard_activity_low_trust".to_string());
+        off.api_param = None;
+        off.api_target = None;
+
+        let steps = compile_v2_steps(&[on, off]);
+
+        assert_eq!(steps.len(), 1);
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert!(routes
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+        assert_eq!(
+            routes[0].get("trust").and_then(Value::as_str),
+            Some("keyboard_activity_low_trust")
+        );
     }
 
     #[test]
@@ -6482,13 +6645,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
-        midi_pitch: None,
-        midi_channel: None,
-        midi_start_beats: None,
-        midi_duration_beats: None,
-        midi_tempo: None,
-        midi_source: None,
-        midi_note_id: None,
+            midi_pitch: None,
+            midi_channel: None,
+            midi_start_beats: None,
+            midi_duration_beats: None,
+            midi_tempo: None,
+            midi_source: None,
+            midi_note_id: None,
             window_title: Some("Untitled - Paint".to_string()),
             app_name: Some("MS Paint".to_string()),
             window_rect: None,
@@ -6575,13 +6738,13 @@ mod tests {
             key: None,
             note: None,
             velocity: None,
-        midi_pitch: None,
-        midi_channel: None,
-        midi_start_beats: None,
-        midi_duration_beats: None,
-        midi_tempo: None,
-        midi_source: None,
-        midi_note_id: None,
+            midi_pitch: None,
+            midi_channel: None,
+            midi_start_beats: None,
+            midi_duration_beats: None,
+            midi_tempo: None,
+            midi_source: None,
+            midi_note_id: None,
             window_title: Some("Untitled - Notepad".to_string()),
             app_name: Some("Notepad".to_string()),
             window_rect: None,
@@ -6605,4 +6768,3 @@ mod tests {
         );
     }
 }
-

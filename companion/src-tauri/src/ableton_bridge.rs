@@ -100,6 +100,30 @@ impl AbletonBridgeSupervisor {
         }
     }
 
+    pub(crate) fn status_without_spawn(&mut self) -> AbletonBridgeHealth {
+        if let Some(child) = self.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.child = None;
+                    return self.health("unavailable", format!("osc bridge exited: {status}"));
+                }
+                Err(error) => {
+                    self.child = None;
+                    return self
+                        .health("unavailable", format!("osc bridge status failed: {error}"));
+                }
+                Ok(None) => {
+                    return match request_bridge_health(&self.config) {
+                        Ok(health) => health,
+                        Err(error) => self.health("degraded", error),
+                    };
+                }
+            }
+        }
+
+        self.health("unavailable", "bridge idle")
+    }
+
     pub(crate) fn health_check(&mut self) -> AbletonBridgeHealth {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -312,7 +336,9 @@ pub(crate) fn run_ableton_osc_bridge() -> Result<(), String> {
                     .and_then(|mut probe| probe.execute(&payload));
                 match result {
                     Ok(value) => json_response(json!({"status": "ok", "output": value}), 200),
-                    Err(error) => json_response(json!({"status": "degraded", "message": error}), 200),
+                    Err(error) => {
+                        json_response(json!({"status": "degraded", "message": error}), 200)
+                    }
                 }
             }
             _ => json_response(json!({"error": "not found"}), 404),
@@ -416,11 +442,26 @@ impl OscHealthProbe {
             if offset + 4 >= args.len() {
                 return Err(format!("MIDI drain response truncated: {args:?}"));
             }
-            let start_time = args.get(offset + 5).cloned().filter(|value| !value.is_empty());
-            let duration = args.get(offset + 6).cloned().filter(|value| !value.is_empty());
-            let tempo = args.get(offset + 7).cloned().filter(|value| !value.is_empty());
-            let note_id = args.get(offset + 8).cloned().filter(|value| !value.is_empty());
-            let source = args.get(offset + 9).cloned().filter(|value| !value.is_empty());
+            let start_time = args
+                .get(offset + 5)
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let duration = args
+                .get(offset + 6)
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let tempo = args
+                .get(offset + 7)
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let note_id = args
+                .get(offset + 8)
+                .cloned()
+                .filter(|value| !value.is_empty());
+            let source = args
+                .get(offset + 9)
+                .cloned()
+                .filter(|value| !value.is_empty());
             events.push(AbletonMidiEvent {
                 kind: args[offset].clone(),
                 channel: args[offset + 1].parse::<u8>().unwrap_or(1),
@@ -565,7 +606,9 @@ fn request_bridge_execute(config: &AbletonBridgeConfig, payload: Value) -> Resul
     Ok(value.get("output").cloned().unwrap_or(value))
 }
 
-fn request_bridge_midi_events(config: &AbletonBridgeConfig) -> Result<Vec<AbletonMidiEvent>, String> {
+fn request_bridge_midi_events(
+    config: &AbletonBridgeConfig,
+) -> Result<Vec<AbletonMidiEvent>, String> {
     let body = request_bridge_path(config, "/midi/drain")?;
     let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("bridge MIDI JSON parse failed: {error}; body={body}"))?;
@@ -590,7 +633,11 @@ fn request_bridge_path(config: &AbletonBridgeConfig, path: &str) -> Result<Strin
     request_bridge_http(config, "GET", path, None)
 }
 
-fn request_bridge_post(config: &AbletonBridgeConfig, path: &str, payload: &Value) -> Result<String, String> {
+fn request_bridge_post(
+    config: &AbletonBridgeConfig,
+    path: &str,
+    payload: &Value,
+) -> Result<String, String> {
     let body = serde_json::to_string(payload).map_err(|error| error.to_string())?;
     request_bridge_http(config, "POST", path, Some(&body))
 }
@@ -783,9 +830,16 @@ mod tests {
         let old_script = health_response_value(
             &config,
             "/marouba/health".to_string(),
-            vec!["ok".to_string(), "marouba-ableton".to_string(), "midi".to_string()],
+            vec![
+                "ok".to_string(),
+                "marouba-ableton".to_string(),
+                "midi".to_string(),
+            ],
         );
-        assert_eq!(old_script.get("status").and_then(Value::as_str), Some("degraded"));
+        assert_eq!(
+            old_script.get("status").and_then(Value::as_str),
+            Some("degraded")
+        );
         assert!(old_script
             .get("message")
             .and_then(Value::as_str)
@@ -802,7 +856,10 @@ mod tests {
                 "execute".to_string(),
             ],
         );
-        assert_eq!(execute_without_v3.get("status").and_then(Value::as_str), Some("degraded"));
+        assert_eq!(
+            execute_without_v3.get("status").and_then(Value::as_str),
+            Some("degraded")
+        );
 
         let new_script = health_response_value(
             &config,
@@ -817,5 +874,4 @@ mod tests {
         );
         assert_eq!(new_script.get("status").and_then(Value::as_str), Some("ok"));
     }
-
 }
