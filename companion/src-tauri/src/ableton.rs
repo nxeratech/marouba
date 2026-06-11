@@ -542,11 +542,14 @@ pub(crate) fn ableton_is_device_name(name: &str) -> bool {
             | "Saturator"
             | "Auto Filter"
             | "Utility"
+            | "Analog"
     )
 }
 
 pub(crate) fn ableton_browser_category_for_device(name: &str) -> Option<&'static str> {
-    if ableton_is_device_name(name) {
+    if matches!(name, "Analog") {
+        Some("Instruments")
+    } else if ableton_is_device_name(name) {
         Some("Audio Effects")
     } else {
         None

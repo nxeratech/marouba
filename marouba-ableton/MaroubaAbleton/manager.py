@@ -217,8 +217,8 @@ class Manager(ControlSurface):
             return self._execute_automation(payload)
         if action in ("arrangement", "arrangement_op"):
             return self._execute_arrangement(payload)
-        if action in ("load_instrument", "load_preset", "browser.load"):
-            raise RuntimeError("Ableton browser loading is not exposed by the public LOM; use UIA/gesture fallback")
+        if action in ("load_device", "load_instrument", "load_preset", "browser.load", "ableton_browser"):
+            return self._execute_load_device(payload)
         raise RuntimeError("unsupported Ableton action: %s" % action)
 
     def _route_payload(self, payload):
@@ -268,6 +268,54 @@ class Manager(ControlSurface):
             "display_value": snapshot[3],
             "normalized_value": snapshot[4],
             "target": snapshot[5],
+        }
+
+    def _execute_load_device(self, payload):
+        payload = self._route_payload(payload)
+        device_name = str(
+            payload.get("name")
+            or payload.get("device")
+            or payload.get("device_name")
+            or payload.get("preset_name")
+            or ""
+        ).strip()
+        if not device_name:
+            raise RuntimeError("load_device route missing device name")
+        track = self._resolve_track(payload)
+        target_index = payload.get("target_index", payload.get("device_index", 0))
+        try:
+            target_index = int(target_index)
+        except Exception:
+            target_index = 0
+        devices_before = list(getattr(track, "devices", []) or [])
+        displaced_device = None
+        if 0 <= target_index < len(devices_before):
+            displaced_device = self._safe_name(devices_before[target_index])
+        replace = bool(payload.get("replace") or payload.get("replacement") or payload.get("displaced_device"))
+        if replace and displaced_device and displaced_device.lower() != device_name.lower():
+            if hasattr(track, "delete_device"):
+                track.delete_device(target_index)
+            else:
+                raise RuntimeError("Track.delete_device unavailable for replacement load")
+        if not hasattr(track, "insert_device"):
+            raise RuntimeError("Track.insert_device unavailable in this Live version")
+        track.insert_device(device_name, target_index)
+        device = self._resolve_device(
+            dict(payload, device=device_name, device_name=device_name),
+            track,
+            strict=True,
+        )
+        applied = self._apply_device_parameter_snapshot(device, payload.get("parameter_snapshot"))
+        return {
+            "action": "load_device",
+            "route": "api",
+            "track": self._safe_name(track),
+            "device": self._safe_name(device),
+            "target_index": target_index,
+            "replace": replace,
+            "displaced_device": displaced_device,
+            "parameters_applied": applied,
+            "target": "track:%s/device:%s" % (self._safe_name(track), self._safe_name(device)),
         }
 
     def _execute_play_note(self, payload):
@@ -335,8 +383,10 @@ class Manager(ControlSurface):
         if not sends:
             raise RuntimeError("selected track has no sends")
         index = payload.get("send_index", payload.get("send", payload.get("param", 0)))
-        if isinstance(index, str) and index.strip().upper().startswith("A"):
-            index = ord(index.strip().upper()[0]) - ord("A")
+        if isinstance(index, str):
+            stripped = index.strip().upper()
+            if stripped and stripped[0].isalpha():
+                index = ord(stripped[0]) - ord("A")
         index = int(index)
         if index < 0 or index >= len(sends):
             raise RuntimeError("send index out of range: %s" % index)
@@ -415,7 +465,7 @@ class Manager(ControlSurface):
             raise RuntimeError("selected track unavailable")
         return track
 
-    def _resolve_device(self, payload, track):
+    def _resolve_device(self, payload, track, strict=None):
         parts = self._target_parts(payload)
         device_name = str(payload.get("device") or payload.get("device_name") or parts.get("device") or "").lower()
         devices = list(getattr(track, "devices", []) or [])
@@ -423,6 +473,10 @@ class Manager(ControlSurface):
             for device in devices:
                 if self._safe_name(device).lower() == device_name:
                     return device
+            if strict is not False:
+                raise RuntimeError("device not found on track %s: %s" % (self._safe_name(track), device_name))
+        elif strict:
+            raise RuntimeError("device target missing for strict route")
         device = self._selected_device()
         if device is not None:
             return device
@@ -443,6 +497,35 @@ class Manager(ControlSurface):
         if parameter is not None:
             return parameter
         raise RuntimeError("parameter unavailable: %s" % param_name)
+
+    def _apply_device_parameter_snapshot(self, device, snapshot):
+        if not snapshot:
+            return 0
+        parameters = list(getattr(device, "parameters", []) or [])
+        applied = 0
+        for item in snapshot:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("param") or item.get("parameter") or "").strip().lower()
+            if not name:
+                continue
+            parameter = None
+            for candidate in parameters:
+                if self._safe_name(candidate).lower() == name:
+                    parameter = candidate
+                    break
+            if parameter is None:
+                continue
+            normalized = self._float_or_none(item.get("normalized"))
+            if normalized is None:
+                normalized = self._float_or_none(item.get("value"))
+            if normalized is None:
+                continue
+            minimum = self._float_or_default(getattr(parameter, "min", 0.0), 0.0)
+            maximum = self._float_or_default(getattr(parameter, "max", 1.0), 1.0)
+            parameter.value = minimum + max(0.0, min(1.0, normalized)) * (maximum - minimum)
+            applied += 1
+        return applied
 
     def _send_name_from_parameter_payload(self, payload):
         parts = self._target_parts(payload)

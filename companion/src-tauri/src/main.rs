@@ -2942,6 +2942,24 @@ fn replay_v2_workflow(
                         "api route failed for {}: {}; falling back to lower route",
                         step.id, error
                     ));
+                    if api_failure_requires_repair(&step, &error) {
+                        route_log.push(json!({
+                            "step": step.id,
+                            "route": "repair",
+                            "reason": error,
+                            "policy": "missing api target; refusing blind gesture fallback"
+                        }));
+                        return (
+                            json!({
+                                "status": "failed",
+                                "error": "api target unavailable",
+                                "detail": route_log.last().cloned().unwrap_or(Value::Null),
+                                "step": step.id,
+                                "intent": step.intent
+                            }),
+                            200,
+                        );
+                    }
                     route_log.push(json!({
                         "step": step.id,
                         "route": "api",
@@ -3043,6 +3061,21 @@ fn replay_api_step(
         .lock()
         .map_err(|_| "Ableton bridge lock poisoned".to_string())?;
     guard.execute(payload)
+}
+
+fn api_failure_requires_repair(step: &VaultReplayStep, error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("device not found")
+        || lower.contains("parameter unavailable")
+        || lower.contains("load_device route missing")
+    {
+        return true;
+    }
+    matches!(step.step_type.as_str(), "load_device")
+        && (lower.contains("insert_device")
+            || lower.contains("delete_device")
+            || lower.contains("unavailable")
+            || lower.contains("missing"))
 }
 
 fn wait_for_ableton_execute_ready(
@@ -5586,6 +5619,21 @@ fn compile_v2_steps(events: &[RecordedEvent]) -> Vec<Value> {
                 continue;
             }
         }
+        if events[index].kind == "mousedown" {
+            if let Some(device_name) = ableton_device_name(&events[index]) {
+                if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                    let segment = events[index..=up_index].to_vec();
+                    flush_gesture_step(&mut steps, &mut gesture_buffer);
+                    steps.push(load_device_step_value(
+                        steps.len() + 1,
+                        &segment,
+                        &device_name,
+                    ));
+                    index = up_index + 1;
+                    continue;
+                }
+            }
+        }
         if events[index].kind == "mousedown" && is_parameter_event_candidate(&events[index]) {
             if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
                 let segment = events[index..=up_index].to_vec();
@@ -5753,6 +5801,72 @@ fn midi_note_step_value(step_number: usize, on: &RecordedEvent, off: &RecordedEv
         },
         "signals": default_step_signals(),
         "routes": routes
+    })
+}
+
+fn load_device_step_value(
+    step_number: usize,
+    segment: &[RecordedEvent],
+    device_name: &str,
+) -> Value {
+    let down = segment.first();
+    let up = segment.last();
+    let app = down
+        .and_then(|event| event.app_name.clone())
+        .or_else(|| up.and_then(|event| event.app_name.clone()))
+        .unwrap_or_else(|| "Ableton Live".to_string());
+    let window_title = down
+        .and_then(|event| event.window_title.clone())
+        .or_else(|| up.and_then(|event| event.window_title.clone()))
+        .unwrap_or_default();
+    let track = down
+        .zip(up)
+        .and_then(|(down, up)| ableton_target_channel_for_device_drag(down, up))
+        .unwrap_or_else(|| "selected track".to_string());
+    let category = ableton_browser_category_for_device(device_name).unwrap_or("Devices");
+    let source_name = down
+        .and_then(|event| event.element_name.clone())
+        .unwrap_or_else(|| device_name.to_string());
+
+    json!({
+        "id": format!("step_{step_number:03}"),
+        "type": "load_device",
+        "intent": format!("Load {device_name} on {track}."),
+        "target": {
+            "app": app,
+            "window_title": window_title,
+            "track": track,
+            "device": device_name,
+            "device_slot": 0,
+            "replacement_semantics": "replace_or_insert_at_recorded_slot"
+        },
+        "value": {
+            "name": device_name,
+            "browser_category": category,
+            "preset_name": source_name,
+            "preset_name_confidence": "uia_label",
+            "parameter_snapshot": [],
+            "snapshot_note": "No parameter snapshot captured for this legacy-inferred load; downstream set_parameter api steps remain authoritative."
+        },
+        "signals": default_step_signals(),
+        "routes": [
+            {
+                "type": "api",
+                "api": "ableton_browser",
+                "action": "load_device",
+                "name": device_name,
+                "device": device_name,
+                "track": track,
+                "target_index": 0,
+                "replace": true,
+                "source": "ableton_lom",
+                "parameter_snapshot": []
+            },
+            {
+                "type": "gesture",
+                "events": segment
+            }
+        ]
     })
 }
 
