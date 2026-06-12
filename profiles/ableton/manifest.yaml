@@ -24,4 +24,5 @@ known_blockers:
   - Ableton exposes only the top-level window through Windows UIA in the current probe.
   - Browser and preset navigation require Remote Script browser helpers beyond the public LOM object list.
   - Dragging arbitrary payloads into plugin or device-specific drop zones remains gesture fallback until per-device loaders are implemented.
+  - Simpler/sample-device payload drops are non-replayable through public LOM unless a future explicit sample-loader route is added; audio clips are replayable only when an absolute sample path and clip/track target are captured.
 setup: one-time Remote Script install using AbletonOSC-style localhost OSC bridge; installer copies script to User Library Remote Scripts and user selects AbletonOSC/Marouba control surface in Live preferences

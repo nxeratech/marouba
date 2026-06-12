@@ -6,3 +6,5 @@ companion-mac/src-tauri/target/
 companion/dist/
 *.pem
 companion/src-tauri/crates/*/target/
+Thumbs.db
+desktop.ini

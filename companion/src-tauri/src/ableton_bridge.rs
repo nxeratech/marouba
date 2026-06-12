@@ -525,19 +525,16 @@ impl OscHealthProbe {
         let mut stale = Vec::<String>::new();
         loop {
             let mut buffer = [0u8; 65_535];
-            let (len, _) = self
-                .socket
-                .recv_from(&mut buffer)
-                .map_err(|error| {
-                    if stale.is_empty() {
-                        format!("Live Remote Script did not answer {address}: {error}")
-                    } else {
-                        format!(
-                            "Live Remote Script did not answer {address}; discarded stale replies: {}",
-                            stale.join(", ")
-                        )
-                    }
-                })?;
+            let (len, _) = self.socket.recv_from(&mut buffer).map_err(|error| {
+                if stale.is_empty() {
+                    format!("Live Remote Script did not answer {address}: {error}")
+                } else {
+                    format!(
+                        "Live Remote Script did not answer {address}; discarded stale replies: {}",
+                        stale.join(", ")
+                    )
+                }
+            })?;
             let decoded = decode_osc_message(&buffer[..len])?;
             if decoded.0 == address {
                 return Ok(decoded);

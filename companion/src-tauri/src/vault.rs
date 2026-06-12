@@ -350,11 +350,23 @@ pub(crate) fn regenerate_vault_index_and_graph() -> Result<(), String> {
         let Some(frontmatter) = frontmatter_block(&content) else {
             continue;
         };
-        let workflow_id = yaml_scalar_field(frontmatter, "id")
-            .unwrap_or_else(|| path.file_stem().and_then(|v| v.to_str()).unwrap_or("workflow").to_string());
+        let workflow_id = yaml_scalar_field(frontmatter, "id").unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("workflow")
+                .to_string()
+        });
         let app = yaml_scalar_field(frontmatter, "app").unwrap_or_else(|| "Unknown".to_string());
-        let description = yaml_scalar_field(frontmatter, "description")
-            .unwrap_or_else(|| content.lines().find(|line| !line.trim().is_empty() && !line.starts_with("---") && !line.starts_with('#')).unwrap_or("Replay recorded workflow.").trim().to_string());
+        let description = yaml_scalar_field(frontmatter, "description").unwrap_or_else(|| {
+            content
+                .lines()
+                .find(|line| {
+                    !line.trim().is_empty() && !line.starts_with("---") && !line.starts_with('#')
+                })
+                .unwrap_or("Replay recorded workflow.")
+                .trim()
+                .to_string()
+        });
         let tags = yaml_inline_list_field(frontmatter, "tags");
         index_lines.push(bounded_index_line(&workflow_id, &app, &tags, &description));
         nodes.push(json!({
@@ -382,7 +394,13 @@ pub(crate) fn regenerate_vault_index_and_graph() -> Result<(), String> {
                     continue;
                 };
                 if file_name.ends_with(&format!("-{workflow_id}.json")) {
-                    let run_id = format!("run:{}", run_path.file_stem().and_then(|v| v.to_str()).unwrap_or(file_name));
+                    let run_id = format!(
+                        "run:{}",
+                        run_path
+                            .file_stem()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or(file_name)
+                    );
                     nodes.push(json!({"id": run_id, "type": "run", "path": relative_slash_path(&vault, &run_path)}));
                     links.push(json!({"from": format!("workflow:{workflow_id}"), "to": run_id, "type": "ran"}));
                 }
@@ -394,11 +412,15 @@ pub(crate) fn regenerate_vault_index_and_graph() -> Result<(), String> {
         let _ = std::fs::write(&path, format!("# {slug}\n"));
         nodes.push(json!({"id": format!("element:{slug}"), "type": "element", "path": relative_slash_path(&vault, &path)}));
     }
-    std::fs::write(vault.join("index.md"), index_lines.join("\n") + if index_lines.is_empty() { "" } else { "\n" })
-        .map_err(|error| error.to_string())?;
+    std::fs::write(
+        vault.join("index.md"),
+        index_lines.join("\n") + if index_lines.is_empty() { "" } else { "\n" },
+    )
+    .map_err(|error| error.to_string())?;
     std::fs::write(
         vault.join("graph.json"),
-        serde_json::to_string_pretty(&json!({"nodes": nodes, "links": links})).map_err(|error| error.to_string())?,
+        serde_json::to_string_pretty(&json!({"nodes": nodes, "links": links}))
+            .map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
     Ok(())
@@ -410,7 +432,9 @@ pub(crate) fn steps_sidecar_path(path: &PathBuf) -> PathBuf {
     }
     path.with_file_name(format!(
         "{}.steps.md",
-        path.file_stem().and_then(|value| value.to_str()).unwrap_or("workflow")
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workflow")
     ))
 }
 
@@ -442,7 +466,13 @@ fn yaml_inline_list_field(frontmatter: &str, field: &str) -> Vec<String> {
     }
     raw.trim_matches(['[', ']'])
         .split(',')
-        .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+        .map(|value| {
+            value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
         .filter(|value| !value.is_empty())
         .collect()
 }
@@ -455,7 +485,12 @@ fn bounded_index_line(workflow_id: &str, app: &str, tags: &[String], intent: &st
     };
     let prefix = format!("[[workflows/{workflow_id}|{workflow_id}]] · {app} · {tags_text} ·");
     let mut words: Vec<&str> = intent.split_whitespace().collect();
-    while !words.is_empty() && format!("{} {}", prefix, words.join(" ")).split_whitespace().count() > 40 {
+    while !words.is_empty()
+        && format!("{} {}", prefix, words.join(" "))
+            .split_whitespace()
+            .count()
+            > 40
+    {
         words.pop();
     }
     format!("{} {}", prefix, words.join(" "))
@@ -465,11 +500,21 @@ fn slugify_element(value: &str) -> String {
     let slug = value
         .to_ascii_lowercase()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    if slug.is_empty() { "element".to_string() } else { slug }
+    if slug.is_empty() {
+        "element".to_string()
+    } else {
+        slug
+    }
 }
 
 fn relative_slash_path(root: &PathBuf, path: &PathBuf) -> String {

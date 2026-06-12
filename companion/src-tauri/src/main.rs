@@ -18,7 +18,7 @@ use vault::*;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::c_void;
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -63,8 +63,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LBUTTON, VK_MENU,
-    VK_ESCAPE, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON,
+    VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -85,6 +85,7 @@ struct AppState {
     events: Vec<RecordedEvent>,
     last_actions: Vec<String>,
     started_polling: bool,
+    pending_capture_enrichments: usize,
     active_window: WindowInfo,
     ableton_bridge: Arc<Mutex<AbletonBridgeSupervisor>>,
     replaying: bool,
@@ -238,6 +239,7 @@ fn main() {
         events: Vec::new(),
         last_actions: vec!["Companion started".to_string()],
         started_polling: false,
+        pending_capture_enrichments: 0,
         active_window: active_window(),
         ableton_bridge: ableton_bridge.clone(),
         replaying: false,
@@ -529,6 +531,7 @@ fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String>
             .map_err(|_| "recording state is unavailable".to_string())?;
         guard.recording = true;
         guard.events.clear();
+        guard.pending_capture_enrichments = 0;
         push_log(&mut guard, "Recording started".to_string());
         if guard.started_polling {
             false
@@ -544,10 +547,16 @@ fn start_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String>
 }
 
 fn stop_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> {
+    {
+        let mut guard = state
+            .lock()
+            .map_err(|_| "recording state is unavailable".to_string())?;
+        guard.recording = false;
+    }
+    wait_for_pending_capture_enrichments(&state, Duration::from_millis(7_500));
     let mut guard = state
         .lock()
         .map_err(|_| "recording state is unavailable".to_string())?;
-    guard.recording = false;
     let before_count = guard.events.len();
     guard.events.retain(|event| !is_marouba_event(event));
     let event_count = guard.events.len();
@@ -563,6 +572,26 @@ fn stop_recording_from_state(state: Arc<Mutex<AppState>>) -> Result<(), String> 
         format!("Recording stopped: {event_count} steps"),
     );
     Ok(())
+}
+
+fn wait_for_pending_capture_enrichments(state: &Arc<Mutex<AppState>>, timeout: Duration) {
+    let started = Instant::now();
+    loop {
+        let pending = state
+            .lock()
+            .map(|guard| guard.pending_capture_enrichments)
+            .unwrap_or(0);
+        if pending == 0 {
+            return;
+        }
+        if started.elapsed() >= timeout {
+            write_debug_log(&format!(
+                "recording stop timeout: {pending} pending capture enrichment(s) still running"
+            ));
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 fn status_from_state(state: &Arc<Mutex<AppState>>) -> RecordingStatus {
     match state.lock() {
@@ -732,6 +761,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
     let mut last_ableton_bridge_check = Instant::now() - Duration::from_secs(5);
     let mut ableton_parameter_drag_active = false;
     let mut ableton_device_drag_baseline: Option<Value> = None;
+    let mut ableton_clip_drag_baseline: Option<Value> = None;
     let mut keyboard_hook_rx: Option<mpsc::Receiver<KeyboardHookEvent>> = None;
 
     loop {
@@ -877,6 +907,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     &window,
                     &current_app_name,
                 );
+                let mut pending_enrichment_started = false;
                 if left && title_is_ableton(&window.title) {
                     ableton_parameter_drag_active = is_parameter_event_candidate(&event);
                     ableton_device_drag_baseline = match ableton_device_snapshot_result(&state) {
@@ -895,14 +926,34 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                             None
                         }
                     };
+                    ableton_clip_drag_baseline = match ableton_clip_snapshot_result(&state) {
+                        Ok(snapshot) => {
+                            write_debug_log(&format!(
+                                "ableton clip diff before snapshot: {}",
+                                describe_ableton_clip_snapshot(&snapshot)
+                            ));
+                            Some(snapshot)
+                        }
+                        Err(error) => {
+                            write_debug_log(&format!(
+                                "ableton clip diff before snapshot unavailable: {error}"
+                            ));
+                            None
+                        }
+                    };
                 }
                 if !left && title_is_ableton(&window.title) && ableton_parameter_drag_active {
                     enrich_ableton_api_parameter_value(&state, &mut event);
                     ableton_parameter_drag_active = false;
                 }
                 if !left && title_is_ableton(&window.title) {
+                    begin_pending_capture_enrichment(&state);
+                    pending_enrichment_started = true;
                     if let Some(before) = ableton_device_drag_baseline.take() {
                         enrich_ableton_load_diff(&state, &mut event, &before);
+                    }
+                    if let Some(before) = ableton_clip_drag_baseline.take() {
+                        enrich_ableton_clip_diff(&state, &mut event, &before);
                     }
                 }
                 if title_is_ableton(&window.title) && event.kind == "mousedown" {
@@ -913,6 +964,9 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
                     }
                 }
                 push_event(&state, event);
+                if pending_enrichment_started {
+                    end_pending_capture_enrichment(&state);
+                }
             }
 
             #[cfg(target_os = "windows")]
@@ -988,7 +1042,7 @@ fn recorder_loop(state: Arc<Mutex<AppState>>) {
 }
 fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
     if let Ok(mut guard) = state.lock() {
-        if !guard.recording {
+        if !guard.recording && !is_flushable_late_enriched_event(&event) {
             return;
         }
         if is_empty_unknown_system_event(&event) {
@@ -998,6 +1052,35 @@ fn push_event(state: &Arc<Mutex<AppState>>, event: RecordedEvent) {
         guard.events.push(event);
         push_log(&mut guard, label);
     }
+}
+
+fn begin_pending_capture_enrichment(state: &Arc<Mutex<AppState>>) {
+    if let Ok(mut guard) = state.lock() {
+        guard.pending_capture_enrichments = guard.pending_capture_enrichments.saturating_add(1);
+    }
+}
+
+fn end_pending_capture_enrichment(state: &Arc<Mutex<AppState>>) {
+    if let Ok(mut guard) = state.lock() {
+        guard.pending_capture_enrichments = guard.pending_capture_enrichments.saturating_sub(1);
+    }
+}
+
+fn is_flushable_late_enriched_event(event: &RecordedEvent) -> bool {
+    if event.kind != "mouseup" || !is_ableton_event(event) {
+        return false;
+    }
+    event.parameter_value_capture_method.as_deref() == Some("ableton_lom")
+        || event
+            .semantic
+            .as_deref()
+            .map(|semantic| {
+                semantic.contains("lom_audio_clip_created")
+                    || semantic.contains("lom_device_loaded")
+                    || semantic.contains("lom_snapshot_no_diff")
+                    || semantic.contains("lom_snapshot_unavailable")
+            })
+            .unwrap_or(false)
 }
 
 fn maybe_log_ableton_bridge_repair(
@@ -1202,6 +1285,20 @@ fn ableton_single_device_snapshot_result(
     ableton_execute_json(state, payload)
 }
 
+fn ableton_clip_snapshot_result(state: &Arc<Mutex<AppState>>) -> Result<Value, String> {
+    let payload = json!({
+        "action": "snapshot_clips",
+        "route": {
+            "type": "api",
+            "api": "ableton_lom",
+            "action": "snapshot_clips",
+            "source": "ableton_lom",
+            "compact": true
+        }
+    });
+    ableton_execute_json(state, payload)
+}
+
 fn ableton_execute_json(state: &Arc<Mutex<AppState>>, payload: Value) -> Result<Value, String> {
     let bridge = ableton_bridge_from_state(state)
         .ok_or_else(|| "Ableton bridge state unavailable".to_string())?;
@@ -1209,6 +1306,52 @@ fn ableton_execute_json(state: &Arc<Mutex<AppState>>, payload: Value) -> Result<
         .lock()
         .map_err(|_| "Ableton bridge lock poisoned".to_string())?;
     guard.execute(payload)
+}
+
+fn enrich_ableton_clip_diff(
+    state: &Arc<Mutex<AppState>>,
+    event: &mut RecordedEvent,
+    before: &Value,
+) {
+    for delay_ms in [150u64, 300, 600, 900, 1_200] {
+        thread::sleep(Duration::from_millis(delay_ms));
+        match ableton_clip_snapshot_result(state) {
+            Ok(after) => {
+                write_debug_log(&format!(
+                    "ableton clip diff after snapshot delay={delay_ms}ms: {}",
+                    describe_ableton_clip_snapshot(&after)
+                ));
+                if let Some(clip) = detected_created_audio_clip(before, &after) {
+                    write_debug_log(&format!(
+                        "ableton clip diff verified clip after delay={delay_ms}ms: {}",
+                        clip.get("clip_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                    ));
+                    write_debug_log(&format!(
+                        "ableton clip diff verified clip details: {}",
+                        clip
+                    ));
+                    event.parameter_value_capture_method = Some("ableton_lom".to_string());
+                    event.api_param = Some("load_sample".to_string());
+                    event.api_device = clip
+                        .get("sample_name")
+                        .or_else(|| clip.get("clip_name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    event.api_target = Some(ableton_clip_api_target(&clip));
+                    event.parameter_value_raw = Some(clip.to_string());
+                    add_semantic_tag(event, "lom_audio_clip_created");
+                    break;
+                }
+            }
+            Err(error) => {
+                write_debug_log(&format!(
+                    "ableton clip diff after snapshot unavailable delay={delay_ms}ms: {error}"
+                ));
+            }
+        }
+    }
 }
 
 fn enrich_ableton_load_diff(
@@ -1315,6 +1458,195 @@ fn detected_loaded_device<'a>(before: &Value, after: &'a Value) -> Option<&'a Va
     None
 }
 
+fn detected_created_audio_clip(before: &Value, after: &Value) -> Option<Value> {
+    let before_clips = flatten_ableton_audio_clips(before);
+    let after_clips = flatten_ableton_audio_clips(after);
+    for (key, after_clip) in after_clips {
+        if !before_clips.contains_key(&key) {
+            return Some(after_clip);
+        }
+    }
+    None
+}
+
+fn flatten_ableton_audio_clips(snapshot: &Value) -> BTreeMap<String, Value> {
+    let mut clips = BTreeMap::new();
+    let Some(tracks) = snapshot.get("tracks").and_then(Value::as_array) else {
+        return clips;
+    };
+    for track in tracks {
+        let track_name = track
+            .get("track_name")
+            .or_else(|| track.get("track"))
+            .and_then(Value::as_str)
+            .unwrap_or("selected track");
+        let track_id = track
+            .get("track_id")
+            .and_then(Value::as_str)
+            .unwrap_or("selected");
+        let track_index = track.get("track_index").and_then(Value::as_i64);
+        if let Some(slots) = track.get("clip_slots").and_then(Value::as_array) {
+            for slot in slots {
+                let Some(clip) = slot.get("clip") else {
+                    continue;
+                };
+                if !ableton_clip_snapshot_is_audio(clip) {
+                    continue;
+                }
+                let slot_index = slot.get("slot_index").and_then(Value::as_i64);
+                let mut item = ableton_clip_outcome_value(clip, track_name, track_id, track_index);
+                item["slot_index"] = slot_index.map(Value::from).unwrap_or(Value::Null);
+                item["position_type"] = json!("clip_slot");
+                let key = ableton_clip_identity_key(&item);
+                clips.insert(key, item);
+            }
+        }
+        if let Some(arrangement) = track.get("arrangement_clips").and_then(Value::as_array) {
+            for clip in arrangement {
+                if !ableton_clip_snapshot_is_audio(clip) {
+                    continue;
+                }
+                let mut item = ableton_clip_outcome_value(clip, track_name, track_id, track_index);
+                item["arrangement_index"] = clip
+                    .get("arrangement_index")
+                    .and_then(Value::as_i64)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null);
+                item["position_type"] = json!("arrangement");
+                let key = ableton_clip_identity_key(&item);
+                clips.insert(key, item);
+            }
+        }
+    }
+    clips
+}
+
+fn ableton_clip_snapshot_is_audio(clip: &Value) -> bool {
+    if clip
+        .get("is_audio_clip")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if clip
+        .get("is_midi_clip")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    clip.get("sample_path")
+        .or_else(|| clip.get("sample_name"))
+        .or_else(|| clip.get("sample"))
+        .is_some()
+}
+
+fn ableton_clip_outcome_value(
+    clip: &Value,
+    track_name: &str,
+    track_id: &str,
+    track_index: Option<i64>,
+) -> Value {
+    let clip_name = clip
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("audio clip");
+    let sample_path = clip.get("sample_path").and_then(Value::as_str).or_else(|| {
+        clip.get("sample")
+            .and_then(|sample| sample.get("file_path"))
+            .and_then(Value::as_str)
+    });
+    let sample_name = clip
+        .get("sample_name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            clip.get("sample")
+                .and_then(|sample| sample.get("name"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(clip_name);
+    let sample_path_source = clip
+        .get("sample_path_source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let clip_file_path_status = clip
+        .get("clip_file_path_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    json!({
+        "clip_id": clip.get("id").cloned().unwrap_or(Value::Null),
+        "clip_name": clip_name,
+        "sample_name": sample_name,
+        "sample_path": sample_path.map(Value::from).unwrap_or(Value::Null),
+        "sample_path_confidence": if sample_path.is_some() { "lom_clip_sample_file_path" } else { "unknown" },
+        "sample_path_source": sample_path_source,
+        "clip_file_path_status": clip_file_path_status,
+        "track_name": track_name,
+        "track": track_name,
+        "track_id": track_id,
+        "track_index": track_index.map(Value::from).unwrap_or(Value::Null),
+        "outcome_type": "audio_clip_created",
+        "outcome_verification": "lom_clip_snapshot_diff"
+    })
+}
+
+fn ableton_clip_identity_key(clip: &Value) -> String {
+    if let Some(id) = clip.get("clip_id").and_then(Value::as_str) {
+        if !id.is_empty() {
+            return format!("id:{id}");
+        }
+    }
+    format!(
+        "track:{}:slot:{}:arr:{}:name:{}:sample:{}",
+        clip.get("track_index")
+            .and_then(Value::as_i64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "selected".to_string()),
+        clip.get("slot_index")
+            .and_then(Value::as_i64)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        clip.get("arrangement_index")
+            .and_then(Value::as_i64)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        clip.get("clip_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        clip.get("sample_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    )
+}
+
+fn ableton_clip_api_target(clip: &Value) -> String {
+    let track_id = clip
+        .get("track_id")
+        .and_then(Value::as_str)
+        .unwrap_or("selected");
+    let track_index = clip
+        .get("track_index")
+        .and_then(Value::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "selected".to_string());
+    let track_name = clip
+        .get("track_name")
+        .or_else(|| clip.get("track"))
+        .and_then(Value::as_str)
+        .unwrap_or("selected track");
+    let position_type = clip
+        .get("position_type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let slot_index = clip
+        .get("slot_index")
+        .and_then(Value::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!("track_id:{track_id}/track_index:{track_index}/track_name:{track_name}/position_type:{position_type}/slot_index:{slot_index}")
+}
+
 fn ableton_load_api_target_from_snapshot(snapshot: &Value, device: &Value) -> String {
     let track_id = snapshot
         .get("track_id")
@@ -1328,10 +1660,7 @@ fn ableton_load_api_target_from_snapshot(snapshot: &Value, device: &Value) -> St
         .get("track")
         .and_then(Value::as_str)
         .unwrap_or("selected track");
-    let device_index = device
-        .get("index")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    let device_index = device.get("index").and_then(Value::as_i64).unwrap_or(0);
     let device_name = device
         .get("name")
         .and_then(Value::as_str)
@@ -1370,6 +1699,43 @@ fn describe_ableton_device_snapshot(snapshot: &Value) -> String {
         names.len(),
         names.join(", ")
     )
+}
+
+fn describe_ableton_clip_snapshot(snapshot: &Value) -> String {
+    let tracks = snapshot
+        .get("tracks")
+        .and_then(Value::as_array)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .map(|track| {
+                    let name = track
+                        .get("track_name")
+                        .or_else(|| track.get("track"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let slot_count = track
+                        .get("clip_slots")
+                        .and_then(Value::as_array)
+                        .map(|slots| {
+                            slots
+                                .iter()
+                                .filter(|slot| slot.get("clip").is_some())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    let arrangement_count = track
+                        .get("arrangement_clips")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    format!("{name}:slots={slot_count},arrangement={arrangement_count}")
+                })
+                .collect::<Vec<_>>()
+                .join(";")
+        })
+        .unwrap_or_default();
+    format!("tracks=[{tracks}]")
 }
 
 fn describe_ableton_single_device_snapshot(snapshot: &Value) -> String {
@@ -2212,7 +2578,9 @@ fn start_replay_workflow(
             write_replay_run_log(
                 &name,
                 "failed",
-                &[json!({"step": "python_replay", "route": "subprocess", "reason": error.to_string()})],
+                &[
+                    json!({"step": "python_replay", "route": "subprocess", "reason": error.to_string()}),
+                ],
             );
             (
                 json!({"status": "failed", "error": format!("failed to start replay: {error}")}),
@@ -3431,7 +3799,7 @@ fn replay_v2_workflow(
                         "reason": error,
                         "failed_route": "api"
                     }));
-                    if step.step_type == "load_device" {
+                    if step.step_type == "load_device" || step.step_type == "load_sample" {
                         write_replay_run_log_update(
                             run_log_path.as_deref(),
                             name,
@@ -3441,7 +3809,7 @@ fn replay_v2_workflow(
                         return (
                             json!({
                                 "status": "failed",
-                                "error": "load_device api route failed; refusing blind fallback",
+                                "error": format!("{} api route failed; refusing blind fallback", step.step_type),
                                 "detail": route_log.last().cloned().unwrap_or(Value::Null),
                                 "step": step.id,
                                 "intent": step.intent,
@@ -6224,26 +6592,39 @@ fn compile_v2_steps(events: &[RecordedEvent]) -> Vec<Value> {
             }
         }
         if events[index].kind == "mousedown" {
-            if ableton_load_payload_name(&events[index]).is_none() {
-                if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+            if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
                 let segment = events[index..=up_index].to_vec();
-                if let Some(verified_name) = verified_lom_device_load_name(&segment) {
+                if let Some(payload_name) = verified_lom_audio_clip_payload_name(&segment) {
                     flush_gesture_step(&mut steps, &mut gesture_buffer);
-                    steps.push(load_device_step_value(
+                    steps.push(load_payload_step_value(
                         steps.len() + 1,
                         &segment,
-                        &verified_name,
+                        &payload_name,
                     ));
                     index = up_index + 1;
                     continue;
                 }
+            }
+            if ableton_load_payload_name(&events[index]).is_none() {
+                if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
+                    let segment = events[index..=up_index].to_vec();
+                    if let Some(verified_name) = verified_lom_device_load_name(&segment) {
+                        flush_gesture_step(&mut steps, &mut gesture_buffer);
+                        steps.push(load_device_step_value(
+                            steps.len() + 1,
+                            &segment,
+                            &verified_name,
+                        ));
+                        index = up_index + 1;
+                        continue;
+                    }
                 }
             }
             if let Some(payload_name) = ableton_load_payload_name(&events[index]) {
                 if let Some(up_index) = matching_mouseup_index_for_recorded(events, index) {
                     let segment = events[index..=up_index].to_vec();
                     flush_gesture_step(&mut steps, &mut gesture_buffer);
-                    steps.push(load_payload_capture_gap_step_value(
+                    steps.push(load_payload_step_value(
                         steps.len() + 1,
                         &segment,
                         &payload_name,
@@ -6377,14 +6758,19 @@ fn ableton_load_payload_name(event: &RecordedEvent) -> Option<String> {
         return None;
     }
     let lower = name.to_ascii_lowercase();
-    let looks_like_payload = [".adg", ".adv", ".als", ".alc", ".alp", ".wav", ".aif", ".aiff", ".mp3"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix));
+    let looks_like_payload = [
+        ".adg", ".adv", ".als", ".alc", ".alp", ".wav", ".aif", ".aiff", ".mp3",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix));
     looks_like_payload.then(|| name.to_string())
 }
 
 fn verified_lom_device_load_name(segment: &[RecordedEvent]) -> Option<String> {
     segment.iter().find_map(|event| {
+        if ableton_event_is_sample_derived_simpler(event) {
+            return None;
+        }
         let source_is_lom = event
             .parameter_value_capture_method
             .as_deref()
@@ -6402,9 +6788,79 @@ fn verified_lom_device_load_name(segment: &[RecordedEvent]) -> Option<String> {
                 .map(|semantic| semantic.contains("lom_device_loaded"))
                 .unwrap_or(false);
         (source_is_lom && marks_load)
-            .then(|| event.api_device.clone().or_else(|| event.element_name.clone()))
+            .then(|| {
+                event
+                    .api_device
+                    .clone()
+                    .or_else(|| event.element_name.clone())
+            })
             .flatten()
     })
+}
+
+fn verified_lom_audio_clip_created(segment: &[RecordedEvent]) -> Option<Value> {
+    segment.iter().find_map(|event| {
+        let source_is_lom = event.parameter_value_capture_method.as_deref() == Some("ableton_lom");
+        let marks_clip = event.api_param.as_deref() == Some("load_sample")
+            || event
+                .semantic
+                .as_deref()
+                .map(|semantic| semantic.contains("lom_audio_clip_created"))
+                .unwrap_or(false);
+        if !source_is_lom || !marks_clip {
+            return None;
+        }
+        event
+            .parameter_value_raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    })
+}
+
+fn verified_lom_audio_clip_payload_name(segment: &[RecordedEvent]) -> Option<String> {
+    let clip = verified_lom_audio_clip_created(segment)?;
+    clip.get("sample_name")
+        .or_else(|| clip.get("clip_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            segment.iter().rev().find_map(|event| {
+                event
+                    .api_device
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn ableton_event_is_sample_derived_simpler(event: &RecordedEvent) -> bool {
+    let Some(raw) = event.parameter_value_raw.as_deref() else {
+        return false;
+    };
+    let Ok(snapshot) = serde_json::from_str::<Value>(raw) else {
+        return false;
+    };
+    let class_name = snapshot
+        .get("class_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if class_name != "SimplerDevice" {
+        return false;
+    }
+    let sample = snapshot.get("sample").unwrap_or(&Value::Null);
+    let sample_name = sample
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let sample_path = sample
+        .get("file_path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    !sample_name.is_empty() || !sample_path.is_empty()
 }
 
 fn segment_has_semantic(segment: &[RecordedEvent], needle: &str) -> bool {
@@ -6731,7 +7187,7 @@ fn load_device_capture_gap_step_value(
     })
 }
 
-fn load_payload_capture_gap_step_value(
+fn load_payload_step_value(
     step_number: usize,
     segment: &[RecordedEvent],
     payload_name: &str,
@@ -6754,62 +7210,261 @@ fn load_payload_capture_gap_step_value(
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    let drop_target_context = ableton_drop_target_context(segment);
+    let verified_clip = verified_lom_audio_clip_created(segment);
+    let verified_position_type = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("position_type"))
+        .and_then(Value::as_str);
+    let drop_target_context = match verified_position_type {
+        Some("clip_slot") => "clip_slot",
+        Some("arrangement") => "arrangement_or_track_free_space",
+        _ => ableton_drop_target_context(segment),
+    };
     let replay_capability = ableton_payload_replay_capability(&drop_target_context, &extension);
-    let sample_path = ableton_sample_path_from_payload(payload_name);
+    let sample_path = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("sample_path"))
+        .filter(|path| !path.is_null())
+        .cloned()
+        .unwrap_or_else(|| ableton_sample_path_from_payload(payload_name));
+    let sample_path_confidence = if sample_path.is_null() {
+        "unknown"
+    } else if verified_clip.is_some() {
+        "lom_clip_sample_file_path"
+    } else {
+        "resolved_local_file"
+    };
+    let sample_path_source = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("sample_path_source"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if sample_path.is_null() {
+                "unknown"
+            } else if verified_clip.is_some() {
+                "lom_clip_snapshot"
+            } else {
+                "local_file_search"
+            }
+        });
+    let clip_file_path_status = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("clip_file_path_status"))
+        .and_then(Value::as_str)
+        .unwrap_or("not_applicable");
+    let outcome_type = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("outcome_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| ableton_payload_outcome_type(&drop_target_context, &extension));
+    let track_name = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("track_name").or_else(|| clip.get("track")))
+        .and_then(Value::as_str)
+        .unwrap_or(&track);
+    let track_id = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("track_id"))
+        .and_then(Value::as_str);
+    let track_index = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("track_index"))
+        .and_then(Value::as_i64);
+    let slot_index = verified_clip
+        .as_ref()
+        .and_then(|clip| clip.get("slot_index"))
+        .and_then(Value::as_i64);
+    let replayable = !sample_path.is_null()
+        && matches!(
+            replay_capability,
+            "lom_clip_slot_create_audio_clip" | "lom_track_create_audio_clip"
+        );
+    let target = json!({
+        "app": app,
+        "window_title": window_title,
+        "track": track_name,
+        "track_name": track_name,
+        "track_id": track_id.map(Value::from).unwrap_or(Value::Null),
+        "track_index": track_index.map(Value::from).unwrap_or(Value::Null),
+        "slot_index": slot_index.map(Value::from).unwrap_or(Value::Null),
+        "payload_name": payload_name,
+        "payload_extension": extension,
+        "drop_target_context": drop_target_context,
+        "outcome_type": outcome_type
+    });
+    let value = json!({
+        "capture_gap": if replayable { Value::Null } else { json!("ableton_load_payload_unverified") },
+        "reason": if replayable {
+            "Absolute audio payload path resolved; replay can use Ableton LOM create_audio_clip and must verify the produced clip."
+        } else {
+            "Readable payload was captured, but no reconstructable api route exists yet. Filename-only or Simpler/device-pad payloads remain capture gaps until a safe payload loader exists."
+        },
+        "sample_path": sample_path,
+        "sample_path_confidence": sample_path_confidence,
+        "sample_path_source": sample_path_source,
+        "clip_file_path_status": clip_file_path_status,
+        "drop_target_context": drop_target_context,
+        "replay_capability": replay_capability,
+        "outcome_type": outcome_type,
+        "outcome_verification": if verified_clip.is_some() { "lom_clip_snapshot_diff" } else if replayable { "post_replay_lom_clip_match" } else { "pending_lom_outcome" },
+        "clip_snapshot": verified_clip,
+        "live_preference_state": "not_readable_from_current_bridge",
+        "readable_metadata": {
+            "browser_item_text": payload_name,
+            "filename": payload_name,
+            "extension": extension
+        }
+    });
+    let mut routes = Vec::new();
+    if replayable {
+        routes.push(json!({
+            "type": "api",
+            "api": "ableton_sample",
+            "action": "load_sample",
+            "source": "ableton_lom",
+            "sample_path": value.get("sample_path").cloned().unwrap_or(Value::Null),
+            "sample_path_source": sample_path_source,
+            "clip_file_path_status": clip_file_path_status,
+            "payload_name": payload_name,
+            "track": track_name,
+            "track_name": track_name,
+            "track_id": track_id.map(Value::from).unwrap_or(Value::Null),
+            "track_index": track_index.map(Value::from).unwrap_or(Value::Null),
+            "slot_index": slot_index.map(Value::from).unwrap_or(Value::Null),
+            "target": target,
+            "drop_target_context": drop_target_context,
+            "outcome_type": outcome_type,
+            "verify": {
+                "type": "audio_clip_exists",
+                "sample_name": payload_name
+            }
+        }));
+    }
+    routes.push(json!({
+        "type": "gesture",
+        "trust": if replayable { "payload_api_primary" } else { "unknown_payload" },
+        "events": segment
+    }));
 
     json!({
         "id": format!("step_{step_number:03}"),
-        "type": "capture_gap",
-        "intent": format!("Unverified Ableton payload load for {payload_name}."),
-        "target": {
-            "app": app,
-            "window_title": window_title,
-            "track": track,
-            "payload_name": payload_name,
-            "payload_extension": extension,
-            "drop_target_context": drop_target_context
+        "type": if replayable { "load_sample" } else { "capture_gap" },
+        "intent": if replayable {
+            format!("Load audio sample {payload_name}.")
+        } else {
+            format!("Unverified Ableton payload load for {payload_name}.")
         },
-        "value": {
-            "capture_gap": "ableton_load_payload_unverified",
-            "reason": "Readable payload was captured, but no reconstructable api route exists yet. Goal-14 must capture browser path/payload dependencies before replay can use this semantically.",
-            "sample_path": sample_path,
-            "sample_path_confidence": "unknown",
-            "drop_target_context": drop_target_context,
-            "replay_capability": replay_capability,
-            "outcome_verification": "pending_lom_outcome",
-            "live_preference_state": "not_readable_from_current_bridge",
-            "readable_metadata": {
-                "browser_item_text": payload_name,
-                "filename": payload_name,
-                "extension": extension
-            }
-        },
+        "target": target,
+        "value": value,
         "signals": default_step_signals(),
-        "routes": [
-            {
-                "type": "gesture",
-                "trust": "unknown_payload",
-                "events": segment
-            }
-        ]
+        "routes": routes
     })
 }
 
-fn ableton_sample_path_from_payload(_: &str) -> Value {
-    Value::Null
+fn ableton_sample_path_from_payload(payload_name: &str) -> Value {
+    ableton_resolve_sample_path(payload_name)
+        .map(|path| json!(path.to_string_lossy().to_string()))
+        .unwrap_or(Value::Null)
 }
 
 fn ableton_payload_replay_capability(drop_target_context: &str, extension: &str) -> &'static str {
     let audio_file = matches!(extension, "wav" | "aif" | "aiff" | "mp3");
     match (audio_file, drop_target_context) {
-        (true, "clip_slot") => "lom_clip_slot_create_audio_clip_when_absolute_path_known",
-        (true, "arrangement_or_track_free_space") => {
-            "lom_track_create_audio_clip_when_absolute_path_known"
-        }
+        (true, "clip_slot") => "lom_clip_slot_create_audio_clip",
+        (true, "arrangement_or_track_free_space") => "lom_track_create_audio_clip",
         (true, "device_or_pad") => "capture_gap_until_sampler_payload_loader_exists",
         _ => "capture_gap_until_payload_replay_route_exists",
     }
+}
+
+fn ableton_payload_outcome_type(drop_target_context: &str, extension: &str) -> &'static str {
+    let audio_file = matches!(extension, "wav" | "aif" | "aiff" | "mp3");
+    match (audio_file, drop_target_context) {
+        (true, "clip_slot") => "audio_clip_created_session",
+        (true, "arrangement_or_track_free_space") => "audio_clip_created_arrangement",
+        (true, "device_or_pad") => "sample_loaded_into_device_or_pad",
+        _ => "unknown_outcome",
+    }
+}
+
+fn ableton_resolve_sample_path(payload_name: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(payload_name);
+    if candidate.is_absolute() && candidate.exists() {
+        return Some(candidate);
+    }
+    if payload_name.contains('\\') || payload_name.contains('/') {
+        return None;
+    }
+    let roots = ableton_sample_search_roots();
+    ableton_resolve_sample_path_in_roots(payload_name, roots.iter().map(PathBuf::as_path))
+}
+
+fn ableton_sample_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(raw) = std::env::var("MAROUBA_SAMPLE_PATH_ROOTS") {
+        roots.extend(
+            raw.split(';')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let user = PathBuf::from(user_profile);
+        roots.push(user.join("Music").join("Ableton"));
+        roots.push(user.join("Documents").join("Ableton"));
+        roots.push(user.join("OneDrive").join("Music").join("Ableton"));
+    }
+    roots.push(PathBuf::from("C:\\ProgramData\\Ableton"));
+    roots.push(PathBuf::from("C:\\Users\\Public\\Documents\\Ableton"));
+    roots
+}
+
+fn ableton_resolve_sample_path_in_roots<'a, I>(payload_name: &str, roots: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    let wanted = payload_name.to_ascii_lowercase();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        if let Some(path) = find_file_by_name_limited(root, &wanted, 5, 0) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn find_file_by_name_limited(
+    root: &Path,
+    wanted_lower: &str,
+    max_depth: usize,
+    depth: usize,
+) -> Option<PathBuf> {
+    if depth > max_depth {
+        return None;
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name_matches = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case(wanted_lower))
+            .unwrap_or(false);
+        if file_name_matches && path.is_file() {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) =
+                find_file_by_name_limited(&path, wanted_lower, max_depth, depth + 1)
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn ableton_drop_target_context(segment: &[RecordedEvent]) -> &'static str {
@@ -6829,10 +7484,9 @@ fn ableton_drop_target_context(segment: &[RecordedEvent]) -> &'static str {
     {
         return "clip_slot";
     }
-    if names
-        .iter()
-        .any(|name| name.contains("simpler") || name.contains("drum pad") || name.contains("device"))
-    {
+    if names.iter().any(|name| {
+        name.contains("simpler") || name.contains("drum pad") || name.contains("device")
+    }) {
         return "device_or_pad";
     }
     if names
@@ -7063,6 +7717,7 @@ mod tests {
             events: Vec::new(),
             last_actions: Vec::new(),
             started_polling: true,
+            pending_capture_enrichments: 0,
             active_window: WindowInfo {
                 title: "Untitled - Ableton Live 12 Suite".to_string(),
                 app_name: "Ableton Live".to_string(),
@@ -7123,6 +7778,61 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("degrading capture to r3 gesture"));
+    }
+
+    #[test]
+    fn stopped_recording_accepts_flushable_enriched_mouseup() {
+        let state = test_app_state(false);
+        let mut up = ableton_test_event("Byte Sized - C0.aif", Some("lom_audio_clip_created"));
+        up.kind = "mouseup".to_string();
+        up.button = Some("left".to_string());
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_param = Some("load_sample".to_string());
+
+        push_event(&state, up);
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.events.len(), 1);
+        assert_eq!(guard.events[0].api_param.as_deref(), Some("load_sample"));
+    }
+
+    #[test]
+    fn stopped_recording_rejects_plain_late_mousemove() {
+        let state = test_app_state(false);
+        let mut event = ableton_test_event("Slots", None);
+        event.kind = "mousemove".to_string();
+
+        push_event(&state, event);
+
+        assert!(state.lock().unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn stop_recording_waits_for_pending_enriched_mouseup_flush() {
+        let state = test_app_state(true);
+        {
+            let mut guard = state.lock().unwrap();
+            guard.pending_capture_enrichments = 1;
+        }
+        let worker_state = state.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(75));
+            let mut up = ableton_test_event("Byte Sized - C0.aif", Some("lom_audio_clip_created"));
+            up.kind = "mouseup".to_string();
+            up.button = Some("left".to_string());
+            up.parameter_value_capture_method = Some("ableton_lom".to_string());
+            up.api_param = Some("load_sample".to_string());
+            push_event(&worker_state, up);
+            end_pending_capture_enrichment(&worker_state);
+        });
+
+        stop_recording_from_state(state.clone()).expect("stop recording");
+
+        let guard = state.lock().unwrap();
+        assert!(!guard.recording);
+        assert_eq!(guard.pending_capture_enrichments, 0);
+        assert_eq!(guard.events.len(), 1);
+        assert_eq!(guard.events[0].api_param.as_deref(), Some("load_sample"));
     }
 
     #[test]
@@ -7477,8 +8187,447 @@ mod tests {
                 .get("value")
                 .and_then(|value| value.get("replay_capability"))
                 .and_then(Value::as_str),
-            Some("lom_track_create_audio_clip_when_absolute_path_known")
+            Some("lom_track_create_audio_clip")
         );
+    }
+
+    #[test]
+    fn ableton_audio_payload_with_resolved_path_gets_api_route() {
+        let root = std::env::temp_dir().join(format!(
+            "marouba-sample-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let nested = root.join("User Library").join("Samples");
+        std::fs::create_dir_all(&nested).expect("sample test dir");
+        let sample_path = nested.join("Found Kick.wav");
+        std::fs::write(&sample_path, b"sample").expect("sample file");
+
+        let found = ableton_resolve_sample_path_in_roots("Found Kick.wav", [root.as_path()]);
+        assert_eq!(found.as_deref(), Some(sample_path.as_path()));
+
+        let mut down = ableton_test_event("Found Kick.wav", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        down.element_name = Some(sample_path.to_string_lossy().to_string());
+        let mut up = ableton_test_event("Slots", Some("channel:Audio"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.button = Some("left".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("load_sample")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert_eq!(routes[0].get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(
+            routes[0].get("api").and_then(Value::as_str),
+            Some("ableton_sample")
+        );
+        assert_eq!(
+            routes[0].get("action").and_then(Value::as_str),
+            Some("load_sample")
+        );
+        assert_eq!(
+            routes[0].get("source").and_then(Value::as_str),
+            Some("ableton_lom")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("outcome_verification"))
+                .and_then(Value::as_str),
+            Some("post_replay_lom_clip_match")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dragtest3_style_clip_slot_diff_compiles_to_load_sample() {
+        let sample_path = "C:\\Samples\\Byte Sized - C3.aif";
+        let mut down = ableton_test_event("Byte Sized - C3.aif", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up =
+            ableton_test_event("Slots", Some("lom_snapshot_no_diff;lom_audio_clip_created"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_300;
+        up.button = Some("left".to_string());
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_param = Some("load_sample".to_string());
+        up.api_device = Some("Byte Sized - C3.aif".to_string());
+        up.api_target = Some(
+            "track_id:lom:track1/track_index:0/track_name:Audio/position_type:clip_slot/slot_index:0"
+                .to_string(),
+        );
+        up.parameter_value_raw = Some(
+            json!({
+                "clip_id": "lom:clip:1",
+                "clip_name": "Byte Sized - C3",
+                "sample_name": "Byte Sized - C3.aif",
+                "sample_path": sample_path,
+                "sample_path_confidence": "lom_clip_sample_file_path",
+                "sample_path_source": "clip.file_path",
+                "clip_file_path_status": "populated",
+                "track_name": "Audio",
+                "track": "Audio",
+                "track_id": "lom:track1",
+                "track_index": 0,
+                "slot_index": 0,
+                "position_type": "clip_slot",
+                "outcome_type": "audio_clip_created",
+                "outcome_verification": "lom_clip_snapshot_diff"
+            })
+            .to_string(),
+        );
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("load_sample")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("drop_target_context"))
+                .and_then(Value::as_str),
+            Some("clip_slot")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("slot_index"))
+                .and_then(Value::as_i64),
+            Some(0)
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path"))
+                .and_then(Value::as_str),
+            Some(sample_path)
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path_confidence"))
+                .and_then(Value::as_str),
+            Some("lom_clip_sample_file_path")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path_source"))
+                .and_then(Value::as_str),
+            Some("clip.file_path")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("clip_file_path_status"))
+                .and_then(Value::as_str),
+            Some("populated")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("outcome_verification"))
+                .and_then(Value::as_str),
+            Some("lom_clip_snapshot_diff")
+        );
+        let api = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .and_then(|routes| routes.first())
+            .expect("api route");
+        assert_eq!(api.get("type").and_then(Value::as_str), Some("api"));
+        assert_eq!(api.get("slot_index").and_then(Value::as_i64), Some(0));
+    }
+
+    #[test]
+    fn verified_clip_outcome_promotes_load_sample_when_uia_name_is_slots() {
+        let sample_path = "C:\\ProgramData\\Ableton\\Live 12 Suite\\Resources\\Core Library\\Samples\\One Shots\\Drums\\Bell\\Chimes Finger Down.aif";
+        let mut down = ableton_test_event("Slots", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 8_329;
+        down.button = Some("left".to_string());
+        let mut move_event = ableton_test_event("", None);
+        move_event.kind = "mousemove".to_string();
+        move_event.timestamp_ms = 8_955;
+        move_event.element_name = None;
+        let mut up =
+            ableton_test_event("Slots", Some("lom_snapshot_no_diff;lom_audio_clip_created"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 9_080;
+        up.button = Some("left".to_string());
+        up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        up.api_param = Some("load_sample".to_string());
+        up.api_device = Some("Chimes Finger Down.aif".to_string());
+        up.api_target = Some(
+            "track_id:lom:2294412640/track_index:1/track_name:2-Chimes Finger Down/position_type:clip_slot/slot_index:0"
+                .to_string(),
+        );
+        up.parameter_value_raw = Some(
+            json!({
+                "clip_file_path_status": "populated",
+                "clip_id": "1646493448",
+                "clip_name": "Chimes Finger Down",
+                "outcome_type": "audio_clip_created",
+                "outcome_verification": "lom_clip_snapshot_diff",
+                "position_type": "clip_slot",
+                "sample_name": "Chimes Finger Down.aif",
+                "sample_path": sample_path,
+                "sample_path_confidence": "lom_clip_sample_file_path",
+                "sample_path_source": "clip.file_path",
+                "slot_index": 0,
+                "track": "2-Chimes Finger Down",
+                "track_id": "lom:2294412640",
+                "track_index": 1,
+                "track_name": "2-Chimes Finger Down"
+            })
+            .to_string(),
+        );
+
+        let steps = compile_v2_steps(&[down, move_event, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("load_sample")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path"))
+                .and_then(Value::as_str),
+            Some(sample_path)
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path_source"))
+                .and_then(Value::as_str),
+            Some("clip.file_path")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("outcome_verification"))
+                .and_then(Value::as_str),
+            Some("lom_clip_snapshot_diff")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert_eq!(
+            routes[0].get("action").and_then(Value::as_str),
+            Some("load_sample")
+        );
+        assert_eq!(
+            routes[0].get("sample_path_source").and_then(Value::as_str),
+            Some("clip.file_path")
+        );
+        assert_eq!(
+            routes[0].get("track_index").and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(routes[0].get("slot_index").and_then(Value::as_i64), Some(0));
+        assert_eq!(
+            routes[1].get("type").and_then(Value::as_str),
+            Some("gesture")
+        );
+    }
+
+    #[test]
+    fn clip_snapshot_diff_detects_new_session_audio_clip() {
+        let before = json!({
+            "tracks": [
+                {"track_name": "Audio", "track_index": 0, "track_id": "lom:track1", "clip_slots": [], "arrangement_clips": []}
+            ]
+        });
+        let after = json!({
+            "tracks": [
+                {
+                    "track_name": "Audio",
+                    "track_index": 0,
+                    "track_id": "lom:track1",
+                    "clip_slots": [
+                        {
+                            "slot_index": 0,
+                            "has_clip": true,
+                            "clip": {
+                                "id": "lom:clip:1",
+                                "name": "Byte Sized - C3",
+                                "is_audio_clip": true,
+                                "sample_name": "Byte Sized - C3.aif",
+                                "sample_path": "C:\\Samples\\Byte Sized - C3.aif"
+                            }
+                        }
+                    ],
+                    "arrangement_clips": []
+                }
+            ]
+        });
+
+        let clip = detected_created_audio_clip(&before, &after).expect("created audio clip");
+
+        assert_eq!(
+            clip.get("position_type").and_then(Value::as_str),
+            Some("clip_slot")
+        );
+        assert_eq!(clip.get("slot_index").and_then(Value::as_i64), Some(0));
+        assert_eq!(
+            clip.get("sample_path").and_then(Value::as_str),
+            Some("C:\\Samples\\Byte Sized - C3.aif")
+        );
+    }
+
+    #[test]
+    fn ableton_audio_payload_to_device_pad_stays_capture_gap() {
+        let mut down = ableton_test_event("Snare.aif", None);
+        down.kind = "mousedown".to_string();
+        down.timestamp_ms = 1_000;
+        down.button = Some("left".to_string());
+        let mut up = ableton_test_event("Simpler", Some("lom_snapshot_no_diff"));
+        up.kind = "mouseup".to_string();
+        up.timestamp_ms = 1_200;
+        up.button = Some("left".to_string());
+
+        let steps = compile_v2_steps(&[down, up]);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[0]
+                .get("target")
+                .and_then(|target| target.get("drop_target_context"))
+                .and_then(Value::as_str),
+            Some("device_or_pad")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("replay_capability"))
+                .and_then(Value::as_str),
+            Some("capture_gap_until_sampler_payload_loader_exists")
+        );
+        let routes = steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .expect("routes");
+        assert!(routes
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+    }
+
+    #[test]
+    fn dragtest1_style_sample_drag_keeps_gap_then_declares_simpler_capture_gap() {
+        let mut sample_down = ableton_test_event("Chimes Finger Down.aif", None);
+        sample_down.kind = "mousedown".to_string();
+        sample_down.timestamp_ms = 1_000;
+        sample_down.button = Some("left".to_string());
+        let mut sample_up = ableton_test_event("Slots", Some("lom_snapshot_no_diff"));
+        sample_up.kind = "mouseup".to_string();
+        sample_up.timestamp_ms = 1_180;
+        sample_up.button = Some("left".to_string());
+
+        let mut simpler_down = ableton_test_event("Simpler", Some("device:Simpler"));
+        simpler_down.kind = "mousedown".to_string();
+        simpler_down.timestamp_ms = 2_000;
+        simpler_down.button = Some("left".to_string());
+        let mut simpler_up = ableton_test_event(
+            "Simpler",
+            Some("device:Simpler;lom_device_loaded:Chimes Finger Down"),
+        );
+        simpler_up.kind = "mouseup".to_string();
+        simpler_up.timestamp_ms = 2_120;
+        simpler_up.button = Some("left".to_string());
+        simpler_up.parameter_value_capture_method = Some("ableton_lom".to_string());
+        simpler_up.api_param = Some("load_device".to_string());
+        simpler_up.api_device = Some("Chimes Finger Down".to_string());
+        simpler_up.api_target = Some(
+            "track_id:lom:1783262176/track_index:2/track_name:3-Simpler/device_index:0/device:Chimes Finger Down"
+                .to_string(),
+        );
+        simpler_up.parameter_value_raw = Some(
+            json!({
+                "index": 0,
+                "id": "lom:device:999",
+                "name": "Chimes Finger Down",
+                "class_name": "SimplerDevice",
+                "sample": {
+                    "name": "Chimes Finger Down",
+                    "file_path": "C:\\Samples\\Chimes Finger Down.aif"
+                },
+                "parameters": [
+                    {"name": "Volume", "display_value": "0.0 dB", "normalized": 0.85}
+                ]
+            })
+            .to_string(),
+        );
+
+        let steps = compile_v2_steps(&[sample_down, sample_up, simpler_down, simpler_up]);
+
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path")),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            steps[0]
+                .get("value")
+                .and_then(|value| value.get("sample_path_confidence"))
+                .and_then(Value::as_str),
+            Some("unknown")
+        );
+        assert!(steps[0]
+            .get("routes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
+
+        assert_eq!(
+            steps[1].get("type").and_then(Value::as_str),
+            Some("capture_gap")
+        );
+        assert_eq!(
+            steps[1]
+                .get("value")
+                .and_then(|value| value.get("capture_gap"))
+                .and_then(Value::as_str),
+            Some("ableton_load_payload_unverified")
+        );
+        assert!(steps[1]
+            .get("routes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .all(|route| route.get("type").and_then(Value::as_str) != Some("api")));
     }
 
     #[test]
@@ -7563,7 +8712,10 @@ mod tests {
         down.timestamp_ms = 1_000;
         down.button = Some("left".to_string());
         down.element_name = None;
-        let mut up = ableton_test_event("in track Drums, scene 5", Some("channel:Drums;lom_device_loaded:Analog"));
+        let mut up = ableton_test_event(
+            "in track Drums, scene 5",
+            Some("channel:Drums;lom_device_loaded:Analog"),
+        );
         up.kind = "mouseup".to_string();
         up.timestamp_ms = 1_300;
         up.button = Some("left".to_string());
@@ -7574,15 +8726,18 @@ mod tests {
             "track_id:lom:1234/track_index:0/track_name:Drums/device_index:1/device:Analog"
                 .to_string(),
         );
-        up.parameter_value_raw = Some(json!({
-            "index": 1,
-            "id": "lom:device:777",
-            "name": "Analog",
-            "class_name": "OriginalSimpler",
-            "parameters": [
-                {"name": "F1 Freq", "display_value": "2.1 kHz", "normalized": 0.6428}
-            ]
-        }).to_string());
+        up.parameter_value_raw = Some(
+            json!({
+                "index": 1,
+                "id": "lom:device:777",
+                "name": "Analog",
+                "class_name": "OriginalSimpler",
+                "parameters": [
+                    {"name": "F1 Freq", "display_value": "2.1 kHz", "normalized": 0.6428}
+                ]
+            })
+            .to_string(),
+        );
 
         let steps = compile_v2_steps(&[down, up]);
 

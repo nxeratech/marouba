@@ -221,8 +221,12 @@ class Manager(ControlSurface):
             return self._execute_device_snapshot(payload)
         if action in ("snapshot_device", "device.snapshot"):
             return self._execute_single_device_snapshot(payload)
+        if action in ("snapshot_clips", "clips.snapshot", "snapshot_clip_grid"):
+            return self._execute_clip_snapshot(payload)
         if action in ("load_device", "load_instrument", "load_preset", "browser.load", "ableton_browser"):
             return self._execute_load_device(payload)
+        if action in ("create_audio_clip", "load_sample", "audio_clip.create", "ableton_sample"):
+            return self._execute_create_audio_clip(payload)
         raise RuntimeError("unsupported Ableton action: %s" % action)
 
     def _route_payload(self, payload):
@@ -326,6 +330,50 @@ class Manager(ControlSurface):
             "target": "track:%s/device:%s" % (self._safe_name(track), self._safe_name(device)),
         }
 
+    def _execute_create_audio_clip(self, payload):
+        payload = self._route_payload(payload)
+        sample_path = str(payload.get("sample_path") or payload.get("path") or "").strip()
+        if not sample_path:
+            raise RuntimeError("create_audio_clip route missing absolute sample_path")
+        if not os.path.isabs(sample_path):
+            raise RuntimeError("create_audio_clip sample_path must be absolute")
+        if not os.path.exists(sample_path):
+            raise RuntimeError("create_audio_clip sample_path not found: %s" % sample_path)
+        drop_target_context = str(payload.get("drop_target_context") or "").strip()
+        track = self._resolve_audio_clip_track(payload)
+        clip = None
+        slot_index = payload.get("slot_index")
+        position = self._float_or_none(payload.get("position"))
+        if drop_target_context == "clip_slot":
+            slot = self._resolve_clip_slot(track, slot_index)
+            if not hasattr(slot, "create_audio_clip"):
+                raise RuntimeError("ClipSlot.create_audio_clip unavailable in this Live version")
+            slot.create_audio_clip(sample_path)
+            clip = getattr(slot, "clip", None)
+        elif drop_target_context == "arrangement_or_track_free_space":
+            if not hasattr(track, "create_audio_clip"):
+                raise RuntimeError("Track.create_audio_clip unavailable in this Live version")
+            track.create_audio_clip(sample_path, 0.0 if position is None else position)
+            clip = self._find_audio_clip_by_sample_name(track, os.path.basename(sample_path))
+        else:
+            raise RuntimeError("create_audio_clip cannot replay drop target context: %s" % drop_target_context)
+        verified = self._verify_audio_clip(clip, sample_path)
+        if not verified.get("ok"):
+            raise RuntimeError("audio clip outcome verification failed: %s" % verified.get("reason", "unknown"))
+        track_index, track_id = self._track_identity(track)
+        return {
+            "action": "create_audio_clip",
+            "route": "api",
+            "track": self._safe_name(track),
+            "track_name": self._safe_name(track),
+            "track_index": track_index,
+            "track_id": track_id,
+            "sample_path": sample_path,
+            "sample_name": os.path.basename(sample_path),
+            "drop_target_context": drop_target_context,
+            "verified": verified,
+        }
+
     def _execute_device_snapshot(self, payload):
         payload = self._route_payload(payload)
         track = self._resolve_track(payload)
@@ -393,6 +441,97 @@ class Manager(ControlSurface):
                 "parameters": self._device_parameter_snapshot(device),
             },
         }
+
+    def _execute_clip_snapshot(self, payload):
+        payload = self._route_payload(payload)
+        include_empty = bool(payload.get("include_empty"))
+        song = self._song()
+        tracks = []
+        for track_index, track in enumerate(list(getattr(song, "tracks", []) or [])):
+            track_index, track_id = self._track_identity(track, track_index)
+            slots = []
+            for slot_index, slot in enumerate(list(getattr(track, "clip_slots", []) or [])):
+                has_clip = False
+                try:
+                    has_clip = bool(getattr(slot, "has_clip", False))
+                except Exception:
+                    has_clip = False
+                item = {
+                    "slot_index": slot_index,
+                    "has_clip": has_clip,
+                }
+                if has_clip:
+                    try:
+                        item["clip"] = self._audio_clip_snapshot(slot.clip)
+                    except Exception:
+                        item["clip"] = {"name": "unreadable"}
+                if has_clip or include_empty:
+                    slots.append(item)
+            arrangement_clips = []
+            for attr_name in ("arrangement_clips", "clips"):
+                try:
+                    for clip_index, clip in enumerate(list(getattr(track, attr_name, []) or [])):
+                        item = self._audio_clip_snapshot(clip)
+                        item["arrangement_index"] = clip_index
+                        arrangement_clips.append(item)
+                    if arrangement_clips:
+                        break
+                except Exception:
+                    continue
+            tracks.append({
+                "track": self._safe_name(track),
+                "track_name": self._safe_name(track),
+                "track_index": track_index,
+                "track_id": track_id,
+                "clip_slots": slots,
+                "arrangement_clips": arrangement_clips,
+            })
+        return {
+            "action": "snapshot_clips",
+            "route": "api",
+            "source": "ableton_lom",
+            "compact": True,
+            "tracks": tracks,
+        }
+
+    def _audio_clip_snapshot(self, clip):
+        item = {
+            "id": self._clip_key(clip),
+            "name": self._safe_name(clip),
+        }
+        for attr_name in ("is_audio_clip", "is_midi_clip"):
+            try:
+                item[attr_name] = bool(getattr(clip, attr_name, False))
+            except Exception:
+                pass
+        clip_file_path_status = "property_absent"
+        clip_file_path = ""
+        try:
+            clip_file_path = str(getattr(clip, "file_path") or "")
+            clip_file_path_status = "populated" if clip_file_path else "empty"
+        except Exception:
+            clip_file_path_status = "property_absent"
+        item["clip_file_path_status"] = clip_file_path_status
+        if clip_file_path:
+            item["file_path"] = clip_file_path
+            item["sample_name"] = os.path.basename(clip_file_path)
+            item["sample_path"] = clip_file_path
+            item["sample_path_source"] = "clip.file_path"
+        try:
+            sample = getattr(clip, "sample", None)
+            if sample is not None:
+                file_path = str(getattr(sample, "file_path", "") or "")
+                item["sample"] = {
+                    "name": self._safe_name(sample),
+                    "file_path": file_path,
+                }
+                if file_path and not item.get("sample_path"):
+                    item["sample_name"] = os.path.basename(file_path)
+                    item["sample_path"] = file_path
+                    item["sample_path_source"] = "clip.sample.file_path"
+        except Exception:
+            pass
+        return item
 
     def _device_parameter_snapshot(self, device):
         parameters = []
@@ -541,6 +680,16 @@ class Manager(ControlSurface):
 
     def _resolve_track(self, payload):
         parts = self._target_parts(payload)
+        if isinstance(payload.get("target"), dict):
+            target = payload.get("target") or {}
+            merged = dict(payload)
+            changed = False
+            for key in ("track_id", "track_index", "track", "track_name"):
+                if key not in merged and target.get(key) is not None:
+                    merged[key] = target.get(key)
+                    changed = True
+            if changed:
+                return self._resolve_track(merged)
         track_id = str(payload.get("track_id") or parts.get("track_id") or "").strip()
         track_name = str(
             payload.get("track")
@@ -568,6 +717,164 @@ class Manager(ControlSurface):
         if track is None:
             raise RuntimeError("selected track unavailable")
         return track
+
+    def _resolve_audio_clip_track(self, payload):
+        payload = self._route_payload(payload)
+        parts = self._target_parts(payload)
+        target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+        track_id = str(payload.get("track_id") or parts.get("track_id") or target.get("track_id") or "").strip()
+        track_name = str(
+            payload.get("track")
+            or payload.get("track_name")
+            or parts.get("track_name")
+            or parts.get("track")
+            or target.get("track")
+            or target.get("track_name")
+            or ""
+        ).strip()
+        track_index = payload.get("track_index", target.get("track_index"))
+        desired_index = self._int_or_none(track_index)
+        tracks = list(getattr(self._song(), "tracks", []) or [])
+
+        if track_id:
+            for index, track in enumerate(tracks):
+                if self._track_identity(track, index)[1] == track_id:
+                    if self._track_can_host_audio_clip(track):
+                        return track
+                    logger.info(
+                        "Recorded audio clip target track id resolved to non-audio track; creating audio target: %s",
+                        self._safe_name(track),
+                    )
+                    return self._create_audio_clip_track(desired_index, track_name)
+
+        if track_name:
+            for track in tracks:
+                if self._safe_name(track).lower() == track_name.lower():
+                    if self._track_can_host_audio_clip(track):
+                        return track
+                    logger.info(
+                        "Recorded audio clip target name resolved to non-audio track; creating audio target: %s",
+                        self._safe_name(track),
+                    )
+                    return self._create_audio_clip_track(desired_index, track_name)
+
+        if desired_index is not None and 0 <= desired_index < len(tracks):
+            candidate = tracks[desired_index]
+            if self._track_can_host_audio_clip(candidate):
+                return candidate
+
+        return self._create_audio_clip_track(desired_index, track_name)
+
+    def _create_audio_clip_track(self, desired_index, track_name):
+        song = self._song()
+        if song is None or not hasattr(song, "create_audio_track"):
+            raise RuntimeError("Song.create_audio_track unavailable; cannot create recorded audio clip target")
+        tracks_before = list(getattr(song, "tracks", []) or [])
+        if desired_index is None:
+            desired_index = len(tracks_before)
+        desired_index = max(0, min(int(desired_index), len(tracks_before)))
+        song.create_audio_track(desired_index)
+        tracks_after = list(getattr(song, "tracks", []) or [])
+        if desired_index >= len(tracks_after):
+            raise RuntimeError("created audio track was not found at recorded index %s" % desired_index)
+        track = tracks_after[desired_index]
+        if not self._track_can_host_audio_clip(track):
+            raise RuntimeError("created track cannot host audio clips: %s" % self._safe_name(track))
+        if track_name:
+            try:
+                track.name = track_name
+            except Exception:
+                logger.info("Could not rename created audio track to %s", track_name)
+        return track
+
+    def _track_can_host_audio_clip(self, track):
+        if track is None:
+            return False
+        try:
+            if getattr(track, "is_foldable", False):
+                return False
+        except Exception:
+            pass
+        try:
+            if bool(getattr(track, "has_audio_input", False)):
+                return True
+        except Exception:
+            pass
+        try:
+            if bool(getattr(track, "has_audio_output", False)) and not bool(getattr(track, "has_midi_input", False)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _resolve_clip_slot(self, track, slot_index):
+        slots = list(getattr(track, "clip_slots", []) or [])
+        if not slots:
+            raise RuntimeError("track has no clip slots")
+        if slot_index is not None:
+            try:
+                index = int(slot_index)
+                if 0 <= index < len(slots):
+                    return slots[index]
+            except Exception:
+                pass
+        for slot in slots:
+            try:
+                if not slot.has_clip:
+                    return slot
+            except Exception:
+                continue
+        return slots[0]
+
+    def _find_audio_clip_by_sample_name(self, track, sample_name):
+        wanted = str(sample_name or "").lower()
+        for slot in list(getattr(track, "clip_slots", []) or []):
+            try:
+                if not slot.has_clip:
+                    continue
+                clip = slot.clip
+                if self._clip_matches_sample_name(clip, wanted):
+                    return clip
+            except Exception:
+                continue
+        view = getattr(self._song(), "view", None)
+        for clip in (
+            getattr(view, "detail_clip", None) if view is not None else None,
+            getattr(view, "highlighted_clip_slot", None).clip if view is not None and getattr(view, "highlighted_clip_slot", None) is not None and getattr(view, "highlighted_clip_slot", None).has_clip else None,
+        ):
+            if clip is not None and self._clip_matches_sample_name(clip, wanted):
+                return clip
+        return None
+
+    def _verify_audio_clip(self, clip, sample_path):
+        if clip is None:
+            return {"ok": False, "reason": "created clip was not found"}
+        sample_name = os.path.basename(sample_path).lower()
+        if not self._clip_matches_sample_name(clip, sample_name):
+            return {
+                "ok": False,
+                "reason": "clip sample/name mismatch",
+                "clip_name": self._safe_name(clip),
+                "expected_sample": os.path.basename(sample_path),
+            }
+        return {
+            "ok": True,
+            "clip_name": self._safe_name(clip),
+            "sample_name": os.path.basename(sample_path),
+        }
+
+    def _clip_matches_sample_name(self, clip, sample_name_lower):
+        names = [self._safe_name(clip).lower()]
+        try:
+            sample = getattr(clip, "sample", None)
+            if sample is not None:
+                names.append(self._safe_name(sample).lower())
+                file_path = str(getattr(sample, "file_path", "") or "").lower()
+                if file_path:
+                    names.append(os.path.basename(file_path))
+        except Exception:
+            pass
+        return any(sample_name_lower and sample_name_lower in name for name in names)
 
     def _track_identity(self, track, known_index=None):
         tracks = list(getattr(self._song(), "tracks", []) or [])
@@ -732,6 +1039,14 @@ class Manager(ControlSurface):
             if value is None or value == "":
                 return None
             return float(value)
+        except Exception:
+            return None
+
+    def _int_or_none(self, value):
+        try:
+            if value is None or value == "":
+                return None
+            return int(value)
         except Exception:
             return None
 
