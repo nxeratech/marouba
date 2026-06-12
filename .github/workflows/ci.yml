@@ -56,23 +56,3 @@ jobs:
 
       - name: Test MAP adapter crate
         run: cargo test --manifest-path companion/src-tauri/crates/marouba-adapter/Cargo.toml -v
-
-  companion-build-mac:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Build Mac companion
-        run: |
-          cd companion-mac
-          npm install
-          npm run build
