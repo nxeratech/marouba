@@ -639,6 +639,13 @@ fn request_global_replay_abort() {
     write_debug_log("replay abort requested");
 }
 
+fn replay_abort_requested_global() -> bool {
+    REPLAY_ABORT_FLAG
+        .get()
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
 fn request_replay_abort(state: Arc<Mutex<AppState>>, source: &str) {
     request_global_replay_abort();
     if let Ok(mut guard) = state.lock() {
@@ -648,11 +655,7 @@ fn request_replay_abort(state: Arc<Mutex<AppState>>, source: &str) {
 }
 
 fn replay_abort_requested(state: &Arc<Mutex<AppState>>) -> bool {
-    if REPLAY_ABORT_FLAG
-        .get()
-        .map(|flag| flag.load(Ordering::SeqCst))
-        .unwrap_or(false)
-    {
+    if replay_abort_requested_global() {
         return true;
     }
     state
@@ -2712,6 +2715,11 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> {
+    if let Some(title) = ableton_recovery_prompt_title() {
+        return Err(format!(
+            "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
+        ));
+    }
     if let Ok(window_title) = focus_running_process_for_targets(candidates) {
         return Ok(window_title);
     }
@@ -2732,6 +2740,11 @@ fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> 
         })?;
     for attempt in 1..=15 {
         thread::sleep(Duration::from_secs(2));
+        if let Some(title) = ableton_recovery_prompt_title() {
+            return Err(format!(
+                "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
+            ));
+        }
         if let Ok(window_title) = focus_first_available_window(candidates) {
             return Ok(window_title);
         }
@@ -2743,6 +2756,20 @@ fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> 
         ));
     }
     Err("Ableton Live not found. Please open it manually and retry.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn ableton_recovery_prompt_title() -> Option<String> {
+    if let Some(title) = visible_window_title_matching(&[
+        "recover",
+        "recovery",
+        "unexpectedly",
+        "crash",
+        "serious program error",
+    ]) {
+        return Some(title);
+    }
+    ableton_recovery_prompt_from_uia()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -3079,6 +3106,7 @@ fn focus_target_window(window_title: &str) -> Result<(), String> {
 struct WindowSearch {
     needles: Vec<String>,
     hwnd: Option<HWND>,
+    title: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -3097,12 +3125,31 @@ fn find_window_containing(target: &str) -> Option<HWND> {
     let mut search = WindowSearch {
         needles,
         hwnd: None,
+        title: None,
     };
     unsafe {
         let search_ptr = &mut search as *mut WindowSearch;
         let _ = EnumWindows(Some(enum_windows_match_title), LPARAM(search_ptr as isize));
     }
     search.hwnd
+}
+
+#[cfg(target_os = "windows")]
+fn visible_window_title_matching(needles: &[&str]) -> Option<String> {
+    let needles = needles
+        .iter()
+        .map(|needle| needle.to_ascii_lowercase())
+        .collect();
+    let mut search = WindowSearch {
+        needles,
+        hwnd: None,
+        title: None,
+    };
+    unsafe {
+        let search_ptr = &mut search as *mut WindowSearch;
+        let _ = EnumWindows(Some(enum_windows_match_title), LPARAM(search_ptr as isize));
+    }
+    search.title
 }
 
 #[cfg(target_os = "windows")]
@@ -3119,6 +3166,7 @@ unsafe extern "system" fn enum_windows_match_title(hwnd: HWND, lparam: LPARAM) -
     let title = String::from_utf16_lossy(&buffer[..len as usize]).to_ascii_lowercase();
     if search.needles.iter().any(|needle| title.contains(needle)) {
         search.hwnd = Some(hwnd);
+        search.title = Some(String::from_utf16_lossy(&buffer[..len as usize]));
         return false.into();
     }
     true.into()
@@ -3207,15 +3255,8 @@ fn screenshot(payload: ScreenshotRequest) -> Value {
 
 #[cfg(target_os = "windows")]
 fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
-    if REPLAY_ABORT_FLAG
-        .get()
-        .map(|flag| flag.load(Ordering::SeqCst))
-        .unwrap_or(false)
-    {
-        return (
-            json!({"ok": false, "status": "aborted", "replayed": 0, "target_window": payload.target_window, "message": "Replay aborted by user"}),
-            200,
-        );
+    if replay_abort_requested_global() {
+        return replay_abort_status(0, payload.target_window, "Replay aborted by user");
     }
     let replay_rect = active_window_rect();
     if let Some(rect) = replay_rect.as_ref() {
@@ -3232,6 +3273,7 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     let mut ableton_added_devices: Vec<String> = Vec::new();
     let mut logged_first_canvas_mousemove = false;
     let mut ableton_note_context_prepared = false;
+    let mut last_replay_cursor: Option<(i32, i32)> = None;
     let replay_events: Vec<&RecordedEvent> = payload
         .events
         .iter()
@@ -3300,14 +3342,11 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
     }
     let mut index = 0usize;
     while index < replay_events.len() {
-        if REPLAY_ABORT_FLAG
-            .get()
-            .map(|flag| flag.load(Ordering::SeqCst))
-            .unwrap_or(false)
-        {
-            return (
-                json!({"ok": false, "status": "aborted", "replayed": replayed, "target_window": payload.target_window, "message": "Replay aborted by user"}),
-                200,
+        if replay_user_override_requested(last_replay_cursor) {
+            return replay_abort_status(
+                replayed,
+                payload.target_window,
+                "aborted_by_user_override",
             );
         }
         let event = replay_events[index];
@@ -3385,10 +3424,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             if keyboard_result.is_ok() {
                 replayed += 1;
             }
-            thread::sleep(replay_event_delay(
+            if !replay_sleep(replay_event_delay(
                 event,
                 replay_events.get(index + 1).copied(),
-            ));
+            )) {
+                return replay_abort_status(
+                    replayed,
+                    payload.target_window,
+                    "aborted_by_user_override",
+                );
+            }
             index += 1;
             continue;
         }
@@ -3402,20 +3447,32 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
         if skipped_toolbar_mousedown && event.kind == "mouseup" {
             skipped_toolbar_mousedown = false;
             ableton_note_grid_mouse_down = false;
-            thread::sleep(replay_event_delay(
+            if !replay_sleep(replay_event_delay(
                 event,
                 replay_events.get(index + 1).copied(),
-            ));
+            )) {
+                return replay_abort_status(
+                    replayed,
+                    payload.target_window,
+                    "aborted_by_user_override",
+                );
+            }
             index += 1;
             continue;
         }
         if skipped_uia_mousedown && event.kind == "mouseup" {
             skipped_uia_mousedown = false;
             ableton_note_grid_mouse_down = false;
-            thread::sleep(replay_event_delay(
+            if !replay_sleep(replay_event_delay(
                 event,
                 replay_events.get(index + 1).copied(),
-            ));
+            )) {
+                return replay_abort_status(
+                    replayed,
+                    payload.target_window,
+                    "aborted_by_user_override",
+                );
+            }
             index += 1;
             continue;
         }
@@ -3458,10 +3515,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     replay_rect.as_ref(),
                 ) {
                     replayed += up_index - index + 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3478,10 +3541,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         ));
                     }
                     replayed += 4;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3491,10 +3560,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     replay_rect.as_ref(),
                 ) {
                     replayed += up_index - index + 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3509,10 +3584,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         index, event.element_name
                     ));
                     replayed += up_index - index + 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3524,10 +3605,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                 ) {
                     ableton_added_devices.push(device_name);
                     replayed += up_index - index + 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3535,10 +3622,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     replay_ableton_drag_if_present(&replay_events, index, replay_rect.as_ref())
                 {
                     replayed += up_index - index + 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         replay_events[up_index],
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3549,10 +3642,16 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             {
                 skipped_uia_mousedown = true;
                 replayed += 1;
-                thread::sleep(replay_event_delay(
+                if !replay_sleep(replay_event_delay(
                     event,
                     replay_events.get(index + 1).copied(),
-                ));
+                )) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
                 index += 1;
                 continue;
             }
@@ -3563,15 +3662,43 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                     write_debug_log(&format!(
                         "fill click segment: down_index={index} up_index={up_index} resolved_down=({x},{y}) resolved_up=({up_x},{up_y})"
                     ));
+                    if replay_user_override_requested(last_replay_cursor) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
+                    last_replay_cursor = Some((x, y));
                     replayed += 1;
-                    thread::sleep(replay_event_delay(event, Some(up_event)));
+                    if !replay_sleep(replay_event_delay(event, Some(up_event))) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
+                    if replay_user_override_requested(last_replay_cursor) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     send_absolute_mouse_input(up_x, up_y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
+                    last_replay_cursor = Some((up_x, up_y));
                     replayed += 1;
-                    thread::sleep(replay_event_delay(
+                    if !replay_sleep(replay_event_delay(
                         up_event,
                         replay_events.get(up_index + 1).copied(),
-                    ));
+                    )) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     index = up_index + 1;
                     continue;
                 }
@@ -3591,22 +3718,64 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
                         write_debug_log(&format!(
                             "shape drag segment: down_index={index} up_index={up_index} endpoint=({end_x},{end_y}) up=({up_x},{up_y})"
                         ));
+                        if replay_user_override_requested(last_replay_cursor) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
                         send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
+                        last_replay_cursor = Some((x, y));
                         replayed += 1;
-                        thread::sleep(replay_event_delay(event, Some(endpoint)));
+                        if !replay_sleep(replay_event_delay(event, Some(endpoint))) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
+                        if replay_user_override_requested(last_replay_cursor) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
                         send_absolute_mousemove(end_x, end_y);
+                        last_replay_cursor = Some((end_x, end_y));
                         replayed += 1;
-                        thread::sleep(replay_event_delay(endpoint, Some(up_event)));
+                        if !replay_sleep(replay_event_delay(endpoint, Some(up_event))) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
+                        if replay_user_override_requested(last_replay_cursor) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
                         send_absolute_mouse_input(
                             up_x,
                             up_y,
                             MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
                         );
+                        last_replay_cursor = Some((up_x, up_y));
                         replayed += 1;
-                        thread::sleep(replay_event_delay(
+                        if !replay_sleep(replay_event_delay(
                             up_event,
                             replay_events.get(up_index + 1).copied(),
-                        ));
+                        )) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
                         index = up_index + 1;
                         continue;
                     }
@@ -3630,49 +3799,125 @@ fn replay_mouse(payload: MouseReplayRequest) -> (Value, u16) {
             event.kind.as_str(),
             event.button.as_deref().unwrap_or("left"),
         ) {
-            ("mousemove", _) if left_button_down => send_absolute_mousemove(x, y),
-            ("mousemove", _) => send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE),
+            ("mousemove", _) if left_button_down => {
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
+                send_absolute_mousemove(x, y);
+                last_replay_cursor = Some((x, y));
+            }
+            ("mousemove", _) => {
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
+                send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE);
+                last_replay_cursor = Some((x, y));
+            }
             ("mousedown", "right") => {
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
                 send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_RIGHTDOWN);
+                last_replay_cursor = Some((x, y));
             }
             ("mouseup", "right") => {
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
                 send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_RIGHTUP);
+                last_replay_cursor = Some((x, y));
             }
             ("mousedown", _) => {
                 left_button_down = true;
                 ableton_note_grid_mouse_down = is_ableton_piano_roll_note_event(event);
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
                 if is_ableton_event(event) {
                     send_ableton_mousemove(x, y);
-                    thread::sleep(Duration::from_millis(8));
+                    if !replay_sleep(Duration::from_millis(8)) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     send_ableton_leftdown(x, y);
                 } else {
                     send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN);
                 }
+                last_replay_cursor = Some((x, y));
             }
             ("mouseup", _) => {
+                if replay_user_override_requested(last_replay_cursor) {
+                    return replay_abort_status(
+                        replayed,
+                        payload.target_window,
+                        "aborted_by_user_override",
+                    );
+                }
                 if is_ableton_event(event) {
                     send_ableton_mousemove(x, y);
-                    thread::sleep(Duration::from_millis(8));
+                    if !replay_sleep(Duration::from_millis(8)) {
+                        return replay_abort_status(
+                            replayed,
+                            payload.target_window,
+                            "aborted_by_user_override",
+                        );
+                    }
                     send_ableton_leftup(x, y);
                     if is_ableton_automation_record_event(event) {
                         write_debug_log(
                             "ableton automation record pressed: waiting 500ms for automation mode",
                         );
-                        thread::sleep(Duration::from_millis(500));
+                        if !replay_sleep(Duration::from_millis(500)) {
+                            return replay_abort_status(
+                                replayed,
+                                payload.target_window,
+                                "aborted_by_user_override",
+                            );
+                        }
                     }
                 } else {
                     send_absolute_mouse_input(x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP);
                 }
+                last_replay_cursor = Some((x, y));
                 left_button_down = false;
                 ableton_note_grid_mouse_down = false;
             }
             _ => {}
         }
         replayed += 1;
-        thread::sleep(replay_event_delay(
+        if !replay_sleep(replay_event_delay(
             event,
             replay_events.get(index + 1).copied(),
-        ));
+        )) {
+            return replay_abort_status(
+                replayed,
+                payload.target_window,
+                "aborted_by_user_override",
+            );
+        }
         index += 1;
     }
     (
@@ -5385,6 +5630,50 @@ fn uia_element_names(element: &IUIAutomationElement) -> Vec<String> {
 }
 
 #[cfg(target_os = "windows")]
+fn ableton_recovery_prompt_from_uia() -> Option<String> {
+    let hwnd = find_window_containing("Ableton").unwrap_or_else(|| unsafe { GetForegroundWindow() });
+    if hwnd.0.is_null() {
+        return None;
+    }
+    unsafe {
+        let automation = create_uia().ok()?;
+        let root = automation.ElementFromHandle(hwnd).ok()?;
+        let walker = automation.ControlViewWalker().ok()?;
+        let mut stack = vec![root];
+        let mut scanned = 0usize;
+        while let Some(element) = stack.pop() {
+            scanned += 1;
+            if scanned > 600 {
+                break;
+            }
+            for name in uia_element_names(&element) {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("recover")
+                    || lower.contains("recovery")
+                    || lower.contains("unexpectedly")
+                    || lower.contains("crash")
+                    || lower.contains("serious program error")
+                {
+                    return Some(name);
+                }
+            }
+            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
+                let mut siblings = vec![first_child.clone()];
+                let mut current = first_child;
+                while let Ok(next) = walker.GetNextSiblingElement(&current) {
+                    siblings.push(next.clone());
+                    current = next;
+                }
+                for child in siblings.into_iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
 fn uia_element_names_and_rect_at_point_with_timeout(
     x: i32,
     y: i32,
@@ -5567,6 +5856,60 @@ fn replay_event_delay(current: &RecordedEvent, next: Option<&RecordedEvent>) -> 
     };
     let delta_ms = (next.timestamp_ms - current.timestamp_ms).clamp(8, max_delay_ms) as u64;
     Duration::from_millis(delta_ms)
+}
+
+fn replay_abort_status(
+    replayed: usize,
+    target_window: Option<String>,
+    message: &str,
+) -> (Value, u16) {
+    (
+        json!({
+            "ok": false,
+            "status": "aborted",
+            "replayed": replayed,
+            "target_window": target_window,
+            "message": message
+        }),
+        200,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn replay_sleep(duration: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < duration {
+        if replay_user_override_requested(None) {
+            return false;
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        thread::sleep(remaining.min(Duration::from_millis(20)));
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn replay_user_override_requested(last_replay_cursor: Option<(i32, i32)>) -> bool {
+    if replay_abort_requested_global() {
+        return true;
+    }
+    if unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) & 0x8000u16 as i16 } != 0 {
+        request_global_replay_abort();
+        write_debug_log("replay aborted by user override: Escape pressed");
+        return true;
+    }
+    if let (Some((last_x, last_y)), Some((x, y))) = (last_replay_cursor, cursor_position()) {
+        let dx = (x - last_x).abs();
+        let dy = (y - last_y).abs();
+        if dx > 120 || dy > 120 {
+            request_global_replay_abort();
+            write_debug_log(&format!(
+                "replay aborted by user override: cursor moved from ({last_x},{last_y}) to ({x},{y})"
+            ));
+            return true;
+        }
+    }
+    false
 }
 
 fn format_window_rect(rect: Option<&WindowRect>) -> String {
