@@ -2839,16 +2839,48 @@ fn is_ableton_crash_report_dialog(value: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn close_ableton_crash_report_dialog() -> Result<(), String> {
     let ableton_process_ids = ableton_live_process_ids();
-    let hwnd = find_window_containing("Report a Crash")
-        .filter(|hwnd| hwnd_owned_by_any_process(*hwnd, &ableton_process_ids))
-        .ok_or_else(|| "Ableton Report a Crash dialog window not found".to_string())?;
-    unsafe {
-        PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))
-            .map_err(|error| format!("PostMessage WM_CLOSE Report a Crash failed: {error}"))?;
+    let mut candidates = Vec::new();
+    if let Some(hwnd) = find_window_containing("Ableton") {
+        push_unique_hwnd(&mut candidates, hwnd);
     }
-    write_debug_log("Ableton Report a Crash dialog closed with WM_CLOSE");
-    thread::sleep(Duration::from_millis(500));
-    Ok(())
+    for hwnd in visible_ableton_top_level_windows(&ableton_process_ids) {
+        push_unique_hwnd(&mut candidates, hwnd);
+    }
+    unsafe {
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        for hwnd in candidates {
+            let Ok(root) = automation.ElementFromHandle(hwnd) else {
+                continue;
+            };
+            let Some(prompt) = crash_report_prompt_in_uia_root(&automation, &root) else {
+                continue;
+            };
+            for button_name in [
+                "Don't Send",
+                "Don\u{2019}t Send",
+                "Close",
+                "No",
+                "Cancel",
+                "OK",
+            ] {
+                if let Some(button) = find_uia_element_by_name(&automation, &root, button_name) {
+                    write_debug_log(&format!(
+                        "Ableton Report a Crash dialog button target found via UIA content: {prompt}; button={button_name}"
+                    ));
+                    return click_uia_element_center(&button, button_name);
+                }
+            }
+            PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))
+                .map_err(|error| format!("PostMessage WM_CLOSE Report a Crash failed: {error}"))?;
+            write_debug_log(
+                "Ableton Report a Crash dialog closed with WM_CLOSE on owning Ableton window",
+            );
+            thread::sleep(Duration::from_millis(500));
+            return Ok(());
+        }
+    }
+    Err("Ableton Report a Crash dialog UIA root not found".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -5963,6 +5995,15 @@ fn guarded_recovery_prompt_in_uia_root(
 ) -> Option<String> {
     recovery_prompt_in_uia_root(automation, root, 800)
         .filter(|name| is_guarded_ableton_untitled_recovery_prompt(name))
+}
+
+#[cfg(target_os = "windows")]
+fn crash_report_prompt_in_uia_root(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Option<String> {
+    recovery_prompt_in_uia_root(automation, root, 800)
+        .filter(|name| is_ableton_crash_report_dialog(name))
 }
 
 #[cfg(target_os = "windows")]
