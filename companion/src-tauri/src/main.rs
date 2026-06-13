@@ -63,8 +63,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_F4,
-    VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_F4, VK_LBUTTON,
+    VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -2790,11 +2790,7 @@ fn ableton_recovery_prompt_title() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn dismiss_ableton_untitled_recovery_prompt(title: &str) -> bool {
-    let lower = title.to_ascii_lowercase();
-    if !(lower.contains("unexpectedly quit")
-        && lower.contains("untitled")
-        && lower.contains("recover your work"))
-    {
+    if !is_guarded_ableton_untitled_recovery_prompt(title) {
         write_debug_log(&format!(
             "Ableton recovery dialog not auto-dismissed; prompt outside guarded Untitled case: {title}"
         ));
@@ -2812,20 +2808,43 @@ fn dismiss_ableton_untitled_recovery_prompt(title: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn is_guarded_ableton_untitled_recovery_prompt(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("unexpectedly quit")
+        && lower.contains("untitled")
+        && lower.contains("recover your work")
+}
+
+#[cfg(target_os = "windows")]
 fn invoke_ableton_recovery_no_button() -> Result<(), String> {
-    let hwnd = find_window_containing("recover your work")
-        .or_else(|| find_window_containing("unexpectedly quit"))
-        .or_else(|| find_window_containing("Ableton"))
-        .ok_or_else(|| "Ableton recovery dialog window not found".to_string())?;
     unsafe {
         let automation =
             create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
-        let root = automation
-            .ElementFromHandle(hwnd)
-            .map_err(|error| format!("failed to read Ableton recovery dialog UIA tree: {error}"))?;
-        let no_button = find_uia_element_by_name(&automation, &root, "No")
-            .ok_or_else(|| "No button not found on Ableton recovery dialog".to_string())?;
-        invoke_uia_element(&no_button, "No")
+        let mut candidates = Vec::new();
+        push_unique_hwnd(&mut candidates, GetForegroundWindow());
+        if let Some(hwnd) = find_window_containing("Ableton") {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in visible_top_level_windows() {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in candidates {
+            let Ok(root) = automation.ElementFromHandle(hwnd) else {
+                continue;
+            };
+            let Some(prompt) = guarded_recovery_prompt_in_uia_root(&automation, &root) else {
+                continue;
+            };
+            let no_button =
+                find_uia_element_by_name(&automation, &root, "No").ok_or_else(|| {
+                    format!("No button not found on guarded Ableton recovery dialog: {prompt}")
+                })?;
+            write_debug_log(&format!(
+                "Ableton recovery dialog No target found via UIA content: {prompt}"
+            ));
+            return invoke_uia_element(&no_button, "No");
+        }
+        Err("Ableton recovery dialog window not found by guarded UIA content".to_string())
     }
 }
 
@@ -3207,6 +3226,42 @@ fn visible_window_title_matching(needles: &[&str]) -> Option<String> {
         let _ = EnumWindows(Some(enum_windows_match_title), LPARAM(search_ptr as isize));
     }
     search.title
+}
+
+#[cfg(target_os = "windows")]
+struct WindowList {
+    hwnds: Vec<HWND>,
+}
+
+#[cfg(target_os = "windows")]
+fn visible_top_level_windows() -> Vec<HWND> {
+    let mut windows = WindowList { hwnds: Vec::new() };
+    unsafe {
+        let windows_ptr = &mut windows as *mut WindowList;
+        let _ = EnumWindows(
+            Some(enum_windows_collect_visible),
+            LPARAM(windows_ptr as isize),
+        );
+    }
+    windows.hwnds
+}
+
+#[cfg(target_os = "windows")]
+fn push_unique_hwnd(candidates: &mut Vec<HWND>, hwnd: HWND) {
+    if hwnd.0.is_null() || candidates.iter().any(|candidate| candidate.0 == hwnd.0) {
+        return;
+    }
+    candidates.push(hwnd);
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn enum_windows_collect_visible(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return true.into();
+    }
+    let windows = &mut *(lparam.0 as *mut WindowList);
+    windows.hwnds.push(hwnd);
+    true.into()
 }
 
 #[cfg(target_os = "windows")]
@@ -5759,7 +5814,8 @@ fn uia_element_names(element: &IUIAutomationElement) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn ableton_recovery_prompt_from_uia() -> Option<String> {
-    let hwnd = find_window_containing("Ableton").unwrap_or_else(|| unsafe { GetForegroundWindow() });
+    let hwnd =
+        find_window_containing("Ableton").unwrap_or_else(|| unsafe { GetForegroundWindow() });
     if hwnd.0.is_null() {
         return None;
     }
@@ -5782,6 +5838,41 @@ fn ableton_recovery_prompt_from_uia() -> Option<String> {
                     || lower.contains("crash")
                     || lower.contains("serious program error")
                 {
+                    return Some(name);
+                }
+            }
+            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
+                let mut siblings = vec![first_child.clone()];
+                let mut current = first_child;
+                while let Ok(next) = walker.GetNextSiblingElement(&current) {
+                    siblings.push(next.clone());
+                    current = next;
+                }
+                for child in siblings.into_iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn guarded_recovery_prompt_in_uia_root(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Option<String> {
+    unsafe {
+        let walker = automation.ControlViewWalker().ok()?;
+        let mut stack = vec![root.clone()];
+        let mut scanned = 0usize;
+        while let Some(element) = stack.pop() {
+            scanned += 1;
+            if scanned > 800 {
+                break;
+            }
+            for name in uia_element_names(&element) {
+                if is_guarded_ableton_untitled_recovery_prompt(&name) {
                     return Some(name);
                 }
             }
