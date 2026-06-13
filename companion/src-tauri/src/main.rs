@@ -2716,9 +2716,15 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
 #[cfg(target_os = "windows")]
 fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> {
     if let Some(title) = ableton_recovery_prompt_title() {
-        return Err(format!(
-            "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
-        ));
+        if dismiss_ableton_untitled_recovery_prompt(&title) {
+            write_debug_log(&format!(
+                "Ableton recovery dialog dismissed with No: {title}"
+            ));
+        } else {
+            return Err(format!(
+                "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
+            ));
+        }
     }
     if let Ok(window_title) = focus_running_process_for_targets(candidates) {
         return Ok(window_title);
@@ -2741,9 +2747,15 @@ fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> 
     for attempt in 1..=15 {
         thread::sleep(Duration::from_secs(2));
         if let Some(title) = ableton_recovery_prompt_title() {
-            return Err(format!(
-                "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
-            ));
+            if dismiss_ableton_untitled_recovery_prompt(&title) {
+                write_debug_log(&format!(
+                    "Ableton recovery dialog dismissed with No: {title}"
+                ));
+            } else {
+                return Err(format!(
+                    "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
+                ));
+            }
         }
         if let Ok(window_title) = focus_first_available_window(candidates) {
             return Ok(window_title);
@@ -2770,6 +2782,47 @@ fn ableton_recovery_prompt_title() -> Option<String> {
         return Some(title);
     }
     ableton_recovery_prompt_from_uia()
+}
+
+#[cfg(target_os = "windows")]
+fn dismiss_ableton_untitled_recovery_prompt(title: &str) -> bool {
+    let lower = title.to_ascii_lowercase();
+    if !(lower.contains("unexpectedly quit")
+        && lower.contains("untitled")
+        && lower.contains("recover your work"))
+    {
+        write_debug_log(&format!(
+            "Ableton recovery dialog not auto-dismissed; prompt outside guarded Untitled case: {title}"
+        ));
+        return false;
+    }
+    match invoke_ableton_recovery_no_button() {
+        Ok(()) => true,
+        Err(error) => {
+            write_debug_log(&format!(
+                "Ableton recovery dialog No dismissal failed: {error}"
+            ));
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn invoke_ableton_recovery_no_button() -> Result<(), String> {
+    let hwnd = find_window_containing("recover your work")
+        .or_else(|| find_window_containing("unexpectedly quit"))
+        .or_else(|| find_window_containing("Ableton"))
+        .ok_or_else(|| "Ableton recovery dialog window not found".to_string())?;
+    unsafe {
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        let root = automation
+            .ElementFromHandle(hwnd)
+            .map_err(|error| format!("failed to read Ableton recovery dialog UIA tree: {error}"))?;
+        let no_button = find_uia_element_by_name(&automation, &root, "No")
+            .ok_or_else(|| "No button not found on Ableton recovery dialog".to_string())?;
+        invoke_uia_element(&no_button, "No")
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
