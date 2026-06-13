@@ -71,10 +71,10 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, MessageBoxW, PostMessageW,
-    SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK,
-    KBDLLHOOKSTRUCT, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    MessageBoxW, PostMessageW, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const COMPANION_HTTP_ADDR: &str = "127.0.0.1:7842";
@@ -2821,11 +2821,15 @@ fn invoke_ableton_recovery_no_button() -> Result<(), String> {
         let automation =
             create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
         let mut candidates = Vec::new();
-        push_unique_hwnd(&mut candidates, GetForegroundWindow());
+        let ableton_process_ids = ableton_live_process_ids();
+        let foreground = GetForegroundWindow();
+        if hwnd_owned_by_any_process(foreground, &ableton_process_ids) {
+            push_unique_hwnd(&mut candidates, foreground);
+        }
         if let Some(hwnd) = find_window_containing("Ableton") {
             push_unique_hwnd(&mut candidates, hwnd);
         }
-        for hwnd in visible_top_level_windows() {
+        for hwnd in visible_ableton_top_level_windows(&ableton_process_ids) {
             push_unique_hwnd(&mut candidates, hwnd);
         }
         for hwnd in candidates {
@@ -3252,6 +3256,59 @@ fn push_unique_hwnd(candidates: &mut Vec<HWND>, hwnd: HWND) {
         return;
     }
     candidates.push(hwnd);
+}
+
+#[cfg(target_os = "windows")]
+fn visible_ableton_top_level_windows(process_ids: &HashSet<u32>) -> Vec<HWND> {
+    visible_top_level_windows()
+        .into_iter()
+        .filter(|hwnd| hwnd_owned_by_any_process(*hwnd, process_ids))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn hwnd_owned_by_any_process(hwnd: HWND, process_ids: &HashSet<u32>) -> bool {
+    if hwnd.0.is_null() || process_ids.is_empty() {
+        return false;
+    }
+    let mut process_id = 0u32;
+    unsafe {
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    process_ids.contains(&process_id)
+}
+
+#[cfg(target_os = "windows")]
+fn ableton_live_process_ids() -> HashSet<u32> {
+    let mut command = Command::new("tasklist");
+    command.args([
+        "/FI",
+        "IMAGENAME eq Ableton Live 12 Suite.exe",
+        "/FO",
+        "CSV",
+        "/NH",
+    ]);
+    let output = no_window_command(&mut command).output();
+    let mut ids = HashSet::new();
+    if let Ok(output) = output {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let fields = parse_simple_csv_line(line);
+            if fields.len() >= 2 && fields[0].eq_ignore_ascii_case("Ableton Live 12 Suite.exe") {
+                if let Ok(id) = fields[1].parse::<u32>() {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+    ids
+}
+
+#[cfg(target_os = "windows")]
+fn parse_simple_csv_line(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|field| field.trim().trim_matches('"').to_string())
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -5838,43 +5895,22 @@ fn uia_element_names(element: &IUIAutomationElement) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn ableton_recovery_prompt_from_uia() -> Option<String> {
-    let hwnd =
-        find_window_containing("Ableton").unwrap_or_else(|| unsafe { GetForegroundWindow() });
-    if hwnd.0.is_null() {
-        return None;
-    }
     unsafe {
         let automation = create_uia().ok()?;
-        let root = automation.ElementFromHandle(hwnd).ok()?;
-        let walker = automation.ControlViewWalker().ok()?;
-        let mut stack = vec![root];
-        let mut scanned = 0usize;
-        while let Some(element) = stack.pop() {
-            scanned += 1;
-            if scanned > 600 {
-                break;
-            }
-            for name in uia_element_names(&element) {
-                let lower = name.to_ascii_lowercase();
-                if lower.contains("recover")
-                    || lower.contains("recovery")
-                    || lower.contains("unexpectedly")
-                    || lower.contains("crash")
-                    || lower.contains("serious program error")
-                {
-                    return Some(name);
-                }
-            }
-            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
-                let mut siblings = vec![first_child.clone()];
-                let mut current = first_child;
-                while let Ok(next) = walker.GetNextSiblingElement(&current) {
-                    siblings.push(next.clone());
-                    current = next;
-                }
-                for child in siblings.into_iter().rev() {
-                    stack.push(child);
-                }
+        let mut candidates = Vec::new();
+        let ableton_process_ids = ableton_live_process_ids();
+        if let Some(hwnd) = find_window_containing("Ableton") {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in visible_ableton_top_level_windows(&ableton_process_ids) {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in candidates {
+            let Ok(root) = automation.ElementFromHandle(hwnd) else {
+                continue;
+            };
+            if let Some(prompt) = recovery_prompt_in_uia_root(&automation, &root, 600) {
+                return Some(prompt);
             }
         }
     }
@@ -5886,17 +5922,33 @@ fn guarded_recovery_prompt_in_uia_root(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
 ) -> Option<String> {
+    recovery_prompt_in_uia_root(automation, root, 800)
+        .filter(|name| is_guarded_ableton_untitled_recovery_prompt(name))
+}
+
+#[cfg(target_os = "windows")]
+fn recovery_prompt_in_uia_root(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+    scan_limit: usize,
+) -> Option<String> {
     unsafe {
         let walker = automation.ControlViewWalker().ok()?;
         let mut stack = vec![root.clone()];
         let mut scanned = 0usize;
         while let Some(element) = stack.pop() {
             scanned += 1;
-            if scanned > 800 {
+            if scanned > scan_limit {
                 break;
             }
             for name in uia_element_names(&element) {
-                if is_guarded_ableton_untitled_recovery_prompt(&name) {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("recover")
+                    || lower.contains("recovery")
+                    || lower.contains("unexpectedly")
+                    || lower.contains("crash")
+                    || lower.contains("serious program error")
+                {
                     return Some(name);
                 }
             }
