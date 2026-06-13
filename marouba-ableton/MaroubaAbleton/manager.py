@@ -849,19 +849,53 @@ class Manager(ControlSurface):
     def _verify_audio_clip(self, clip, sample_path):
         if clip is None:
             return {"ok": False, "reason": "created clip was not found"}
+        clip_file_path = self._clip_file_path(clip)
+        if clip_file_path:
+            if self._same_file_path(clip_file_path, sample_path):
+                return {
+                    "ok": True,
+                    "clip_name": self._safe_name(clip),
+                    "sample_name": os.path.basename(sample_path),
+                    "sample_path": sample_path,
+                    "clip_file_path": clip_file_path,
+                    "sample_path_source": "clip.file_path",
+                }
+            return {
+                "ok": False,
+                "reason": "clip file_path mismatch",
+                "clip_name": self._safe_name(clip),
+                "expected_sample_path": sample_path,
+                "clip_file_path": clip_file_path,
+            }
         sample_name = os.path.basename(sample_path).lower()
         if not self._clip_matches_sample_name(clip, sample_name):
             return {
                 "ok": False,
-                "reason": "clip sample/name mismatch",
+                "reason": "clip file_path unavailable and sample/name fallback mismatch",
                 "clip_name": self._safe_name(clip),
                 "expected_sample": os.path.basename(sample_path),
+                "expected_sample_path": sample_path,
+                "clip_file_path_status": "empty_or_absent",
             }
         return {
             "ok": True,
             "clip_name": self._safe_name(clip),
             "sample_name": os.path.basename(sample_path),
+            "sample_path": sample_path,
+            "sample_path_source": "sample_or_name_fallback",
         }
+
+    def _clip_file_path(self, clip):
+        try:
+            return str(getattr(clip, "file_path") or "")
+        except Exception:
+            return ""
+
+    def _same_file_path(self, left, right):
+        try:
+            return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+        except Exception:
+            return str(left or "") == str(right or "")
 
     def _clip_matches_sample_name(self, clip, sample_name_lower):
         names = [self._safe_name(clip).lower()]
