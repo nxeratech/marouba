@@ -63,18 +63,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_LBUTTON,
-    VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_F4,
+    VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_RETURN, VK_SHIFT, VK_TAB,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EnumWindows, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, MessageBoxW, SetCursorPos,
-    SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT,
-    MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, MessageBoxW, PostMessageW,
+    SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage, HHOOK,
+    KBDLLHOOKSTRUCT, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const COMPANION_HTTP_ADDR: &str = "127.0.0.1:7842";
@@ -2355,6 +2355,10 @@ fn start_http_api(
                     Err(error) => json_response(json!({"ok": false, "error": error}), 200),
                 }
             }
+            (Method::Post, "/ableton/close") => {
+                let result = close_ableton_with_alt_f4();
+                json_response(result, 200)
+            }
             (Method::Get, "/window") => json_response(json!(active_window()), 200),
             (Method::Get, "/workflows") => {
                 let (body, status) = list_saved_workflows();
@@ -3241,6 +3245,77 @@ fn replay_python_command() -> &'static str {
 fn command_exists(command: &str) -> bool {
     let mut command = Command::new(command);
     command.arg("--version");
+    no_window_command(&mut command)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn close_ableton_with_alt_f4() -> Value {
+    let Some(hwnd) =
+        find_window_containing("Ableton Live").or_else(|| find_window_containing("Ableton"))
+    else {
+        return json!({"status": "not_running", "forced": false});
+    };
+    match post_alt_f4(hwnd) {
+        Ok(()) => write_debug_log("Ableton close requested via Alt+F4 PostMessage"),
+        Err(error) => {
+            return json!({"status": "failed", "forced": false, "error": error});
+        }
+    }
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(15) {
+        thread::sleep(Duration::from_millis(500));
+        if !ableton_live_process_running() {
+            return json!({"status": "closed", "forced": false});
+        }
+    }
+    write_debug_log(
+        "Ableton did not close after Alt+F4 within 15s; force-killing. Next run may show recovery dialog.",
+    );
+    let forced = force_kill_ableton_live();
+    json!({"status": "force_killed", "forced": forced})
+}
+
+#[cfg(not(target_os = "windows"))]
+fn close_ableton_with_alt_f4() -> Value {
+    json!({"status": "unsupported", "forced": false, "error": "Ableton close is Windows-only"})
+}
+
+#[cfg(target_os = "windows")]
+fn post_alt_f4(hwnd: HWND) -> Result<(), String> {
+    const F4_SCAN_CODE: isize = 0x3e;
+    let lparam_down = LPARAM(1 | (F4_SCAN_CODE << 16) | (1 << 29));
+    let lparam_up = LPARAM(1 | (F4_SCAN_CODE << 16) | (1 << 29) | (1 << 30) | (1 << 31));
+    unsafe {
+        PostMessageW(hwnd, WM_SYSKEYDOWN, WPARAM(VK_F4.0 as usize), lparam_down)
+            .map_err(|error| format!("PostMessage WM_SYSKEYDOWN Alt+F4 failed: {error}"))?;
+        PostMessageW(hwnd, WM_SYSKEYUP, WPARAM(VK_F4.0 as usize), lparam_up)
+            .map_err(|error| format!("PostMessage WM_SYSKEYUP Alt+F4 failed: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ableton_live_process_running() -> bool {
+    let mut command = Command::new("tasklist");
+    command.args(["/FI", "IMAGENAME eq Ableton Live 12 Suite.exe"]);
+    let output = no_window_command(&mut command).output();
+    output
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .contains("ableton live 12 suite.exe")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn force_kill_ableton_live() -> bool {
+    let mut command = Command::new("taskkill");
+    command.args(["/IM", "Ableton Live 12 Suite.exe", "/F"]);
     no_window_command(&mut command)
         .output()
         .map(|output| output.status.success())
@@ -5954,10 +6029,14 @@ fn replay_user_override_requested(last_replay_cursor: Option<(i32, i32)>) -> boo
     if let (Some((last_x, last_y)), Some((x, y))) = (last_replay_cursor, cursor_position()) {
         let dx = (x - last_x).abs();
         let dy = (y - last_y).abs();
-        if dx > 120 || dy > 120 {
+        let mouse_button_down = unsafe {
+            (GetAsyncKeyState(VK_LBUTTON.0 as i32) & 0x8000u16 as i16) != 0
+                || (GetAsyncKeyState(VK_RBUTTON.0 as i32) & 0x8000u16 as i16) != 0
+        };
+        if (dx > 300 || dy > 300) && mouse_button_down {
             request_global_replay_abort();
             write_debug_log(&format!(
-                "replay aborted by user override: cursor moved from ({last_x},{last_y}) to ({x},{y})"
+                "replay aborted by user override: cursor moved from ({last_x},{last_y}) to ({x},{y}) while mouse button was pressed"
             ));
             return true;
         }
