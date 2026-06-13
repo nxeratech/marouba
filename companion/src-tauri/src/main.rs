@@ -3458,6 +3458,7 @@ fn close_ableton_with_alt_f4() -> Value {
         }
     }
     let started = Instant::now();
+    let mut sent_physical_alt_f4 = false;
     while started.elapsed() < Duration::from_secs(15) {
         thread::sleep(Duration::from_millis(500));
         if let Some(title) = ableton_untitled_save_prompt_title() {
@@ -3473,6 +3474,21 @@ fn close_ableton_with_alt_f4() -> Value {
         }
         if !ableton_live_process_running() {
             return json!({"status": "closed", "forced": false});
+        }
+        if !sent_physical_alt_f4 && started.elapsed() >= Duration::from_secs(3) {
+            match send_foreground_alt_f4(hwnd) {
+                Ok(()) => {
+                    sent_physical_alt_f4 = true;
+                    write_debug_log(
+                        "Ableton close requested via foreground SendInput Alt+F4 fallback",
+                    );
+                }
+                Err(error) => {
+                    write_debug_log(&format!(
+                        "Ableton SendInput Alt+F4 fallback failed: {error}"
+                    ));
+                }
+            }
         }
     }
     write_debug_log(
@@ -3580,12 +3596,31 @@ fn post_alt_f4(hwnd: HWND) -> Result<(), String> {
     let lparam_down = LPARAM(1 | (F4_SCAN_CODE << 16) | (1 << 29));
     let lparam_up = LPARAM(1 | (F4_SCAN_CODE << 16) | (1 << 29) | (1 << 30) | (1 << 31));
     unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = SetForegroundWindow(hwnd);
+        thread::sleep(Duration::from_millis(120));
         PostMessageW(hwnd, WM_SYSKEYDOWN, WPARAM(VK_F4.0 as usize), lparam_down)
             .map_err(|error| format!("PostMessage WM_SYSKEYDOWN Alt+F4 failed: {error}"))?;
         PostMessageW(hwnd, WM_SYSKEYUP, WPARAM(VK_F4.0 as usize), lparam_up)
             .map_err(|error| format!("PostMessage WM_SYSKEYUP Alt+F4 failed: {error}"))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn send_foreground_alt_f4(hwnd: HWND) -> Result<(), String> {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        if !SetForegroundWindow(hwnd).as_bool() {
+            return Err("SetForegroundWindow returned false".to_string());
+        }
+    }
+    thread::sleep(Duration::from_millis(120));
+    send_key_down(VK_MENU)?;
+    thread::sleep(Duration::from_millis(30));
+    let result = send_key(VK_F4);
+    let alt_up = send_key_up(VK_MENU);
+    result.and(alt_up)
 }
 
 #[cfg(target_os = "windows")]
