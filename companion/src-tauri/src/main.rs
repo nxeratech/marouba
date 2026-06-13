@@ -3528,7 +3528,8 @@ fn ableton_untitled_save_prompt_title() -> Option<String> {
             let Ok(root) = automation.ElementFromHandle(hwnd) else {
                 continue;
             };
-            if let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root) {
+            let title = window_title_for_hwnd(hwnd).unwrap_or_default();
+            if let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root, &title) {
                 return Some(prompt);
             }
         }
@@ -3566,7 +3567,8 @@ fn click_ableton_untitled_save_prompt_button() -> Result<(), String> {
             let Ok(root) = automation.ElementFromHandle(hwnd) else {
                 continue;
             };
-            let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root) else {
+            let title = window_title_for_hwnd(hwnd).unwrap_or_default();
+            let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root, &title) else {
                 continue;
             };
             for button_name in ["Don't Save", "Don\u{2019}t Save", "No"] {
@@ -6129,7 +6131,9 @@ fn crash_report_prompt_in_uia_root(
 fn untitled_save_prompt_in_uia_root(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
+    window_title: &str,
 ) -> Option<String> {
+    let window_is_untitled = window_title.to_ascii_lowercase().contains("untitled");
     unsafe {
         let walker = automation.ControlViewWalker().ok()?;
         let mut stack = vec![root.clone()];
@@ -6141,10 +6145,12 @@ fn untitled_save_prompt_in_uia_root(
             }
             for name in uia_element_names(&element) {
                 let lower = name.to_ascii_lowercase();
-                if lower.contains("untitled")
-                    && lower.contains("save")
-                    && (lower.contains("changes") || lower.contains("live set"))
-                {
+                let text_is_save_prompt = lower.contains("save")
+                    && (lower.contains("changes")
+                        || lower.contains("live set")
+                        || lower.contains("set"));
+                let text_is_untitled = lower.contains("untitled");
+                if text_is_save_prompt && (text_is_untitled || window_is_untitled) {
                     return Some(name);
                 }
             }
