@@ -2730,14 +2730,17 @@ fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> 
                 executable.display()
             )
         })?;
-    for _ in 0..60 {
-        thread::sleep(Duration::from_millis(500));
+    for attempt in 1..=15 {
+        thread::sleep(Duration::from_secs(2));
         if let Ok(window_title) = focus_first_available_window(candidates) {
             return Ok(window_title);
         }
         if let Ok(window_title) = focus_running_process_for_targets(candidates) {
             return Ok(window_title);
         }
+        write_debug_log(&format!(
+            "Ableton preflight window poll attempt {attempt}/15: not ready"
+        ));
     }
     Err("Ableton Live not found. Please open it manually and retry.".to_string())
 }
