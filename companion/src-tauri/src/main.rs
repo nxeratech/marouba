@@ -74,7 +74,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     MessageBoxW, PostMessageW, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
     TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    SM_CYSCREEN, SW_SHOWNORMAL, WH_KEYBOARD_LL, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 
 const COMPANION_HTTP_ADDR: &str = "127.0.0.1:7842";
@@ -2720,10 +2721,8 @@ fn ensure_target_window_ready(candidates: &[String]) -> Result<String, String> {
 #[cfg(target_os = "windows")]
 fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> {
     if let Some(title) = ableton_recovery_prompt_title() {
-        if dismiss_ableton_untitled_recovery_prompt(&title) {
-            write_debug_log(&format!(
-                "Ableton recovery dialog dismissed with No: {title}"
-            ));
+        if dismiss_safe_ableton_startup_dialog(&title) {
+            write_debug_log(&format!("Ableton startup dialog dismissed safely: {title}"));
         } else {
             return Err(format!(
                 "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
@@ -2751,10 +2750,8 @@ fn ensure_ableton_window_ready(candidates: &[String]) -> Result<String, String> 
     for attempt in 1..=15 {
         thread::sleep(Duration::from_secs(2));
         if let Some(title) = ableton_recovery_prompt_title() {
-            if dismiss_ableton_untitled_recovery_prompt(&title) {
-                write_debug_log(&format!(
-                    "Ableton recovery dialog dismissed with No: {title}"
-                ));
+            if dismiss_safe_ableton_startup_dialog(&title) {
+                write_debug_log(&format!("Ableton startup dialog dismissed safely: {title}"));
             } else {
                 return Err(format!(
                     "Ableton recovery dialog is open ({title}). Choose a recovery option, then retry."
@@ -2791,9 +2788,6 @@ fn ableton_recovery_prompt_title() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn dismiss_ableton_untitled_recovery_prompt(title: &str) -> bool {
     if !is_guarded_ableton_untitled_recovery_prompt(title) {
-        write_debug_log(&format!(
-            "Ableton recovery dialog not auto-dismissed; prompt outside guarded Untitled case: {title}"
-        ));
         return false;
     }
     match invoke_ableton_recovery_no_button() {
@@ -2808,11 +2802,53 @@ fn dismiss_ableton_untitled_recovery_prompt(title: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn dismiss_safe_ableton_startup_dialog(title: &str) -> bool {
+    if !is_guarded_ableton_untitled_recovery_prompt(title) {
+        if is_ableton_crash_report_dialog(title) {
+            match close_ableton_crash_report_dialog() {
+                Ok(()) => return true,
+                Err(error) => {
+                    write_debug_log(&format!(
+                        "Ableton crash report dialog dismissal failed: {error}"
+                    ));
+                    return false;
+                }
+            }
+        }
+        write_debug_log(&format!(
+            "Ableton recovery dialog not auto-dismissed; prompt outside guarded Untitled case: {title}"
+        ));
+        return false;
+    }
+    dismiss_ableton_untitled_recovery_prompt(title)
+}
+
+#[cfg(target_os = "windows")]
 fn is_guarded_ableton_untitled_recovery_prompt(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("unexpectedly quit")
         && lower.contains("untitled")
         && lower.contains("recover your work")
+}
+
+#[cfg(target_os = "windows")]
+fn is_ableton_crash_report_dialog(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("Report a Crash")
+}
+
+#[cfg(target_os = "windows")]
+fn close_ableton_crash_report_dialog() -> Result<(), String> {
+    let ableton_process_ids = ableton_live_process_ids();
+    let hwnd = find_window_containing("Report a Crash")
+        .filter(|hwnd| hwnd_owned_by_any_process(*hwnd, &ableton_process_ids))
+        .ok_or_else(|| "Ableton Report a Crash dialog window not found".to_string())?;
+    unsafe {
+        PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))
+            .map_err(|error| format!("PostMessage WM_CLOSE Report a Crash failed: {error}"))?;
+    }
+    write_debug_log("Ableton Report a Crash dialog closed with WM_CLOSE");
+    thread::sleep(Duration::from_millis(500));
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -3372,9 +3408,9 @@ fn close_ableton_with_alt_f4() -> Value {
         return json!({"status": "not_running", "forced": false});
     };
     if let Some(title) = ableton_recovery_prompt_title() {
-        if dismiss_ableton_untitled_recovery_prompt(&title) {
+        if dismiss_safe_ableton_startup_dialog(&title) {
             write_debug_log(&format!(
-                "Ableton close: dismissed guarded recovery dialog before Alt+F4: {title}"
+                "Ableton close: dismissed safe startup dialog before Alt+F4: {title}"
             ));
         } else {
             return json!({"status": "recovery_blocked", "forced": false, "error": format!("Ableton recovery dialog is open ({title})")});
