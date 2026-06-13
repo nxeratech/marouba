@@ -2846,7 +2846,10 @@ fn invoke_ableton_recovery_no_button() -> Result<(), String> {
             write_debug_log(&format!(
                 "Ableton recovery dialog No target found via UIA content: {prompt}"
             ));
-            return invoke_uia_element(&no_button, "No");
+            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            let _ = SetForegroundWindow(hwnd);
+            thread::sleep(Duration::from_millis(120));
+            return click_uia_element_center(&no_button, "No");
         }
         Err("Ableton recovery dialog window not found by guarded UIA content".to_string())
     }
@@ -6092,6 +6095,34 @@ fn invoke_uia_element(element: &IUIAutomationElement, name: &str) -> Result<(), 
             .Invoke()
             .map_err(|error| format!("failed to invoke UIA element '{name}': {error}"))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn click_uia_element_center(element: &IUIAutomationElement, name: &str) -> Result<(), String> {
+    let rect = unsafe {
+        element
+            .CurrentBoundingRectangle()
+            .map_err(|error| format!("UIA element '{name}' has no bounding rect: {error}"))?
+    };
+    let x = rect.left + ((rect.right - rect.left) / 2);
+    let y = rect.top + ((rect.bottom - rect.top) / 2);
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return Err(format!(
+            "UIA element '{name}' has invalid bounding rect left={} top={} right={} bottom={}",
+            rect.left, rect.top, rect.right, rect.bottom
+        ));
+    }
+    write_debug_log(&format!(
+        "UIA physical click on '{name}' at ({x},{y}) from rect left={} top={} right={} bottom={}",
+        rect.left, rect.top, rect.right, rect.bottom
+    ));
+    send_cursor_mousemove(x, y);
+    thread::sleep(Duration::from_millis(80));
+    send_cursor_leftdown(x, y);
+    thread::sleep(Duration::from_millis(80));
+    send_cursor_leftup(x, y);
+    thread::sleep(Duration::from_millis(250));
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
