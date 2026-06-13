@@ -3308,10 +3308,20 @@ fn command_exists(command: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn close_ableton_with_alt_f4() -> Value {
-    let Some(hwnd) =
-        find_window_containing("Ableton Live").or_else(|| find_window_containing("Ableton"))
-    else {
+    if !ableton_live_process_running() {
         return json!({"status": "not_running", "forced": false});
+    };
+    if let Some(title) = ableton_recovery_prompt_title() {
+        if dismiss_ableton_untitled_recovery_prompt(&title) {
+            write_debug_log(&format!(
+                "Ableton close: dismissed guarded recovery dialog before Alt+F4: {title}"
+            ));
+        } else {
+            return json!({"status": "recovery_blocked", "forced": false, "error": format!("Ableton recovery dialog is open ({title})")});
+        }
+    }
+    let Some(hwnd) = wait_for_ableton_window_for_close(Duration::from_secs(15)) else {
+        return json!({"status": "failed", "forced": false, "error": "Ableton process is running but no closeable window was found"});
     };
     match post_alt_f4(hwnd) {
         Ok(()) => write_debug_log("Ableton close requested via Alt+F4 PostMessage"),
@@ -3331,6 +3341,20 @@ fn close_ableton_with_alt_f4() -> Value {
     );
     let forced = force_kill_ableton_live();
     json!({"status": "force_killed", "forced": forced})
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_ableton_window_for_close(timeout: Duration) -> Option<HWND> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if let Some(hwnd) =
+            find_window_containing("Ableton Live").or_else(|| find_window_containing("Ableton"))
+        {
+            return Some(hwnd);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    None
 }
 
 #[cfg(not(target_os = "windows"))]
