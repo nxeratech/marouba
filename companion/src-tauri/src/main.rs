@@ -3460,6 +3460,17 @@ fn close_ableton_with_alt_f4() -> Value {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(15) {
         thread::sleep(Duration::from_millis(500));
+        if let Some(title) = ableton_untitled_save_prompt_title() {
+            if dismiss_ableton_untitled_save_prompt() {
+                write_debug_log(&format!(
+                    "Ableton close: dismissed guarded Untitled save prompt: {title}"
+                ));
+            } else {
+                write_debug_log(&format!(
+                    "Ableton close: guarded Untitled save prompt dismissal failed: {title}"
+                ));
+            }
+        }
         if !ableton_live_process_running() {
             return json!({"status": "closed", "forced": false});
         }
@@ -3483,6 +3494,79 @@ fn wait_for_ableton_window_for_close(timeout: Duration) -> Option<HWND> {
         thread::sleep(Duration::from_millis(500));
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn ableton_untitled_save_prompt_title() -> Option<String> {
+    unsafe {
+        let automation = create_uia().ok()?;
+        let ableton_process_ids = ableton_live_process_ids();
+        let mut candidates = Vec::new();
+        if let Some(hwnd) = find_window_containing("Ableton") {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in visible_ableton_top_level_windows(&ableton_process_ids) {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in candidates {
+            let Ok(root) = automation.ElementFromHandle(hwnd) else {
+                continue;
+            };
+            if let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root) {
+                return Some(prompt);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn dismiss_ableton_untitled_save_prompt() -> bool {
+    match click_ableton_untitled_save_prompt_button() {
+        Ok(()) => true,
+        Err(error) => {
+            write_debug_log(&format!(
+                "Ableton Untitled save prompt dismissal failed: {error}"
+            ));
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn click_ableton_untitled_save_prompt_button() -> Result<(), String> {
+    unsafe {
+        let automation =
+            create_uia().map_err(|error| format!("failed to start UIAutomation: {error}"))?;
+        let ableton_process_ids = ableton_live_process_ids();
+        let mut candidates = Vec::new();
+        if let Some(hwnd) = find_window_containing("Ableton") {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in visible_ableton_top_level_windows(&ableton_process_ids) {
+            push_unique_hwnd(&mut candidates, hwnd);
+        }
+        for hwnd in candidates {
+            let Ok(root) = automation.ElementFromHandle(hwnd) else {
+                continue;
+            };
+            let Some(prompt) = untitled_save_prompt_in_uia_root(&automation, &root) else {
+                continue;
+            };
+            for button_name in ["Don't Save", "Don\u{2019}t Save", "No"] {
+                if let Some(button) = find_uia_element_by_name(&automation, &root, button_name) {
+                    write_debug_log(&format!(
+                        "Ableton Untitled save prompt button target found via UIA content: {prompt}; button={button_name}"
+                    ));
+                    return click_uia_element_center(&button, button_name);
+                }
+            }
+            return Err(format!(
+                "Untitled save prompt found but no safe discard button was found: {prompt}"
+            ));
+        }
+    }
+    Err("Ableton Untitled save prompt UIA root not found".to_string())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -6004,6 +6088,45 @@ fn crash_report_prompt_in_uia_root(
 ) -> Option<String> {
     recovery_prompt_in_uia_root(automation, root, 800)
         .filter(|name| is_ableton_crash_report_dialog(name))
+}
+
+#[cfg(target_os = "windows")]
+fn untitled_save_prompt_in_uia_root(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+) -> Option<String> {
+    unsafe {
+        let walker = automation.ControlViewWalker().ok()?;
+        let mut stack = vec![root.clone()];
+        let mut scanned = 0usize;
+        while let Some(element) = stack.pop() {
+            scanned += 1;
+            if scanned > 800 {
+                break;
+            }
+            for name in uia_element_names(&element) {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("untitled")
+                    && lower.contains("save")
+                    && (lower.contains("changes") || lower.contains("live set"))
+                {
+                    return Some(name);
+                }
+            }
+            if let Ok(first_child) = walker.GetFirstChildElement(&element) {
+                let mut siblings = vec![first_child.clone()];
+                let mut current = first_child;
+                while let Ok(next) = walker.GetNextSiblingElement(&current) {
+                    siblings.push(next.clone());
+                    current = next;
+                }
+                for child in siblings.into_iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
