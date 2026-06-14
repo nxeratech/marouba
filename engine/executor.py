@@ -17,6 +17,7 @@ from engine.comfyui_adapter import ComfyUIAdapter
 from engine.obs_adapter import ObsAdapter
 from engine.resolume_adapter import ResolumeAdapter
 from engine.resolve_adapter import ResolveAdapter
+from engine.touchdesigner_adapter import TouchDesignerAdapter
 
 
 class Executor:
@@ -66,6 +67,9 @@ class Executor:
             return self._result(False, error=str(exc), started=start, route=route, source=source)
 
     def _execute_adapter(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if str(route.get("adapter") or "").casefold() in {"touchdesigner", "touch-designer"}:
+            result = TouchDesignerAdapter().execute(route, params, workflow)
+            return params.get("output_path") or json.dumps(result, sort_keys=True)
         if str(route.get("adapter") or "").casefold() == "resolume":
             result = ResolumeAdapter().execute(route, params, workflow)
             return params.get("output_path") or json.dumps(result, sort_keys=True)

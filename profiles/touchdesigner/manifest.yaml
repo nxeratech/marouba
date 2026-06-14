@@ -1,0 +1,15 @@
+adapter: touchdesigner
+mechanism: python-api + shared-osc-udp
+tier: T1
+versions: ["2023.x", "2025.x"]
+capabilities:
+  network_topology: full
+  operator_creation: full
+  operator_connections: full
+  parameter_values: full
+  osc_in_out: full
+known_blockers:
+  - Capture must fail if network topology is missing.
+  - Capture must fail if any touched parameter value is approximate or unreadable.
+  - Private/encrypted components require explicit exported .tox payloads or repair.
+setup: TouchDesigner installed; Marouba capture script runs inside TouchDesigner Python, with OSC In/Out DAT or shared OSC UDP enabled for live messages.
