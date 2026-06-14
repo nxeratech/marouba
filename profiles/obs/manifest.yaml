@@ -1,0 +1,17 @@
+adapter: obs-studio
+mechanism: obs-websocket
+tier: T1
+versions: ["30.x", "31.x"]
+capabilities:
+  scenes: full
+  sources: full
+  source_settings: full
+  filters: full
+  filter_params: full
+  transitions: full
+  audio_levels: full
+  scene_item_transforms: full
+known_blockers:
+  - Browser/login flows inside a browser source are outside OBS collection state and remain source-content responsibility.
+  - Capture must fail if obs-websocket exposes a filter but does not return its filterSettings.
+setup: OBS Studio with obs-websocket 5.x enabled on localhost:4455 and password configured if authentication is enabled.
