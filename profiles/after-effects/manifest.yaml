@@ -1,0 +1,15 @@
+adapter: after-effects
+mechanism: extendscript
+tier: T1
+versions: ["2025", "2026", "latest"]
+capabilities:
+  comps: full
+  layers: full
+  effects: full
+  keyframes: full_when_property_values_are_exact
+  expressions: full
+known_blockers:
+  - Keyframe values must be read exactly from Property APIs.
+  - Approximate graph/pixel-derived keyframe values are refused.
+  - Plugin effects with hidden params are declared gaps, not r1 captures.
+setup: After Effects installed locally with ExtendScript capture/replay bridge enabled.

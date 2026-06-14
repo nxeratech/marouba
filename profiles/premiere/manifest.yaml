@@ -1,0 +1,15 @@
+adapter: premiere
+mechanism: uxp + extendscript
+tier: T1
+versions: ["2025", "2026", "latest"]
+capabilities:
+  timeline_items: full
+  clip_timing: full
+  effect_params: full_when_component_params_expose_exact_values
+  keyframes: full_when_component_params_expose_exact_values
+  ui_gaps: uia
+known_blockers:
+  - Effect and keyframe params must be read numerically from ComponentParam APIs.
+  - UI-only or approximate keyframe values are refused.
+  - Third-party effects with hidden params are declared gaps, not r1 captures.
+setup: Premiere Pro installed locally with UXP or ExtendScript capture bridge enabled.
