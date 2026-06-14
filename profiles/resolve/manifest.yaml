@@ -1,0 +1,17 @@
+adapter: davinci-resolve
+mechanism: python-scripting-api + guarded-uia-gaps
+tier: T2
+versions: ["18.x", "19.x", "20.x"]
+capabilities:
+  timeline_ops: full
+  media_pool_ops: full
+  timeline_item_properties: full
+  cdl_grades: full
+  lut_nodes: full
+  drx_grade_payloads: full
+  arbitrary_grade_node_parameters: gap
+  color_page_ui_gestures: fallback
+known_blockers:
+  - Arbitrary grade node internals are not approximated; capture must use exact API values, CDL/LUT/DRX payloads, or declare capture_gap.
+  - Color page gestures are r2/r3 repair evidence only and cannot satisfy grade-value PASS alone.
+setup: DaVinci Resolve installed with scripting enabled; Python can import DaVinciResolveScript from the Resolve Developer/Scripting modules path.
