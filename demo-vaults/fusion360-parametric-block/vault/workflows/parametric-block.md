@@ -1,0 +1,31 @@
+---
+id: fusion360-parametric-block
+name: Fusion 360 Parametric Block
+app: Fusion 360
+app_version: latest
+author: nxeratech
+category: cad
+description: Demo parameter timeline replay.
+params: []
+tags: [fusion360, adapter, parameters, demo]
+created: 2026-06-14
+routes:
+  - type: adapter
+    adapter: fusion360
+    events:
+      - route_tier: r1
+        app: Fusion 360
+        kind: feature
+        action: set_parameter
+        timeline_index: 0
+        feature_id: param_width
+        parameter_name: width
+        expression: 80 mm
+        parameters: {unit: mm, value: 80}
+fallback_order: [adapter, uia, ask]
+verification: {type: timeline_feature_hash}
+calls: []
+depends_on: []
+---
+
+# Fusion 360 Parametric Block

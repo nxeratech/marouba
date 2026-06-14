@@ -1,0 +1,16 @@
+adapter: fusion360
+mechanism: python-api-design-timeline
+tier: T1
+versions: ["2024", "2025", "2026", "latest"]
+capabilities:
+  design_timeline: full
+  sketches: full_when_api_parameters_captured
+  profiles: full
+  extrudes: full
+  fillets: full
+  user_parameters: full
+known_blockers:
+  - Timeline order must be exact and contiguous.
+  - Feature values marked approximate or unreadable are refused.
+  - UI-only feature history cannot be promoted to r1.
+setup: Fusion 360 installed locally with Marouba Python add-in capture/replay bridge enabled.

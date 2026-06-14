@@ -16,6 +16,7 @@ from engine.aftereffects_adapter import AfterEffectsAdapter
 from engine.autocad_adapter import AutoCADAdapter
 from engine.blender_adapter import BlenderAdapter
 from engine.comfyui_adapter import ComfyUIAdapter
+from engine.fusion360_adapter import Fusion360Adapter
 from engine.obs_adapter import ObsAdapter
 from engine.photoshop_adapter import PhotoshopAdapter
 from engine.premiere_adapter import PremiereAdapter
@@ -73,6 +74,9 @@ class Executor:
             return self._result(False, error=str(exc), started=start, route=route, source=source)
 
     def _execute_adapter(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if str(route.get("adapter") or "").casefold() in {"fusion360", "fusion-360", "fusion"}:
+            result = Fusion360Adapter().execute(route, params, workflow)
+            return params.get("output_path") or json.dumps(result, sort_keys=True)
         if str(route.get("adapter") or "").casefold() in {"autocad", "auto-cad"}:
             result = AutoCADAdapter().execute(route, params, workflow)
             return params.get("output_path") or json.dumps(result, sort_keys=True)
