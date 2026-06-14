@@ -3601,12 +3601,52 @@ fn post_alt_f4(hwnd: HWND) -> Result<(), String> {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
         thread::sleep(Duration::from_millis(120));
+        release_mouse_buttons_for_close();
+        thread::sleep(Duration::from_millis(100));
         PostMessageW(hwnd, WM_SYSKEYDOWN, WPARAM(VK_F4.0 as usize), lparam_down)
             .map_err(|error| format!("PostMessage WM_SYSKEYDOWN Alt+F4 failed: {error}"))?;
         PostMessageW(hwnd, WM_SYSKEYUP, WPARAM(VK_F4.0 as usize), lparam_up)
             .map_err(|error| format!("PostMessage WM_SYSKEYUP Alt+F4 failed: {error}"))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn release_mouse_buttons_for_close() {
+    unsafe {
+        let inputs = [
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: 0,
+                        dy: 0,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_LEFTUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: 0,
+                        dy: 0,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_RIGHTUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        write_debug_log(&format!(
+            "Ableton close: released mouse buttons before Alt+F4; sent={sent}"
+        ));
+    }
 }
 
 #[cfg(target_os = "windows")]
