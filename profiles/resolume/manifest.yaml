@@ -1,0 +1,14 @@
+adapter: resolume
+mechanism: shared-osc-udp
+tier: T1
+versions: ["7.x"]
+capabilities:
+  clips: full
+  layers: full
+  effects: full
+  composition_params: full
+  exact_param_values: full
+known_blockers:
+  - Capture must fail if a touched OSC-exposed Resolume parameter value cannot be read or recorded exactly.
+  - Address mapping must be validated against the local Resolume OSC shortcuts/preferences before machine PASS.
+setup: Resolume Arena/Avenue with OSC input enabled; default replay target is localhost UDP port 7000 using Marouba's shared OSC transport.
