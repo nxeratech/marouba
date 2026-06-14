@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from engine.companion_client import CompanionClient
+from engine.comfyui_adapter import ComfyUIAdapter
 
 
 class Executor:
@@ -61,6 +62,9 @@ class Executor:
             return self._result(False, error=str(exc), started=start, route=route, source=source)
 
     def _execute_adapter(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if str(route.get("adapter") or "").casefold() == "comfyui":
+            result = ComfyUIAdapter().execute(route, params, workflow)
+            return params.get("output_path") or json.dumps(result, sort_keys=True)
         if not self.companion.health():
             raise RuntimeError("Companion is not running; MAP adapter execute requires companion HTTP")
         response = self.companion.adapter_execute({
