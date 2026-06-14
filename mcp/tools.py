@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
 import sys
+import textwrap
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ if str(ROOT) not in sys.path:
 from engine.executor import Executor
 from engine.router import Router
 from engine.vault import Vault
+from marketplace.installer import InstallError, install_bundle
 from scripts.replay import replay_workflow as run_replay_workflow
 
 
@@ -45,12 +49,107 @@ def list_workflows() -> list[dict[str, Any]]:
     return vault().list_vaults()
 
 
-def read_workflow(workflow_id: str) -> str:
-    """Return the raw Markdown for a workflow by id, name, or file stem."""
+def search_workflows(query: str = "", app: str | None = None, tags: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    """Search workflows by id, name, app, description, and tags."""
 
+    query_terms = [term.casefold() for term in str(query or "").split() if term.strip()]
+    wanted_tags = {tag.casefold() for tag in (tags or []) if str(tag).strip()}
+    app_term = str(app or "").casefold().strip()
+    results = []
+    for workflow in vault().list_vaults():
+        haystack_parts = [
+            workflow.get("id"),
+            workflow.get("name"),
+            workflow.get("app"),
+            workflow.get("description"),
+            " ".join(str(tag) for tag in workflow.get("tags", [])),
+        ]
+        haystack = " ".join(str(part or "") for part in haystack_parts).casefold()
+        workflow_tags = {str(tag).casefold() for tag in workflow.get("tags", [])}
+        if query_terms and not all(term in haystack for term in query_terms):
+            continue
+        if app_term and app_term not in str(workflow.get("app") or "").casefold():
+            continue
+        if wanted_tags and not wanted_tags.issubset(workflow_tags):
+            continue
+        score = sum(haystack.count(term) for term in query_terms) if query_terms else 1
+        results.append({**workflow, "score": score})
+
+    results.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name") or "")))
+    return results[: max(1, int(limit or 10))]
+
+
+def teach_workflow(
+    name: str,
+    app: str,
+    actions: list[dict[str, Any]],
+    description: str = "",
+) -> dict[str, Any]:
+    """Create and save a taught sequence workflow from captured action dictionaries."""
+
+    workflow = workflow_from_actions(name=name, app=app, actions=actions, description=description, tags=["taught", slugify(app)])
+    path = vault().save_workflow(workflow)
+    return {"status": "saved", "id": workflow["id"], "path": str(path), "workflow": workflow_summary(workflow)}
+
+
+def compose_workflow(
+    name: str,
+    app: str,
+    intent: str,
+    routes: list[dict[str, Any]] | None = None,
+    params: list[dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+    confirm_save: bool = False,
+) -> dict[str, Any]:
+    """Compose a workflow preview; save only when confirm_save is true."""
+
+    workflow = {
+        "id": slugify(name),
+        "name": name,
+        "app": app,
+        "description": intent,
+        "params": params or [],
+        "tags": tags or ["composed", slugify(app)],
+        "author": "nxeratech",
+        "created": date.today().isoformat(),
+        "routes": routes or [],
+        "fallback_order": fallback_order(routes or []),
+        "verification": {"type": "none"},
+        "calls": [],
+        "depends_on": [],
+        "body": f"# {name}\n\n{intent}\n",
+    }
+    if not confirm_save:
+        return {
+            "status": "needs_confirmation",
+            "message": "Review the workflow preview, then call compose_workflow again with confirm_save=true to save.",
+            "workflow": workflow,
+        }
+    path = vault().save_workflow(workflow)
+    return {"status": "saved", "id": workflow["id"], "path": str(path), "workflow": workflow_summary(workflow)}
+
+
+def install_workflow(bundle: str) -> dict[str, Any]:
+    """Install a signed .mwf workflow bundle after Ed25519 verification."""
+
+    try:
+        path = install_bundle(bundle, configured_root())
+    except InstallError as error:
+        return {"status": "refused", "ok": False, "error": str(error)}
+    except Exception as error:
+        return {"status": "failed", "ok": False, "error": str(error)}
+    return {"status": "installed", "ok": True, "path": str(path)}
+
+
+def read_workflow(workflow_id: str, depth: str = "summary") -> dict[str, Any]:
+    """Return a depth-gated workflow view by id, name, or file stem."""
+
+    depth = normalize_workflow_depth(depth)
     target = workflow_id.casefold()
     workflows_dir = vault().workflows_dir
     for path in sorted(workflows_dir.rglob("*.md")):
+        if path.name.endswith(".steps.md"):
+            continue
         workflow = vault().load_workflow(path)
         candidates = {
             str(workflow.get("id", "")).casefold(),
@@ -59,8 +158,214 @@ def read_workflow(workflow_id: str) -> str:
             path.name.casefold(),
         }
         if target in candidates:
-            return path.read_text(encoding="utf-8")
+            return workflow_read_payload(path, workflow, depth, workflow_source_text(path))
     raise FileNotFoundError(f"Workflow not found: {workflow_id}")
+
+
+def workflow_from_actions(
+    name: str,
+    app: str,
+    actions: list[dict[str, Any]],
+    description: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    routes = [route for action in actions if (route := action_to_route(action))]
+    today = date.today().isoformat()
+    return {
+        "id": slugify(name),
+        "name": name,
+        "app": app,
+        "mode": "sequence",
+        "description": description or f"Taught workflow for {app}.",
+        "params": [],
+        "tags": tags or ["taught", slugify(app)],
+        "author": "nxeratech",
+        "created": today,
+        "last_verified": today,
+        "routes": routes,
+        "fallback_order": fallback_order(routes),
+        "verification": {"type": "none"},
+        "calls": [],
+        "depends_on": [],
+        "body": f"# {name}\n\n{description or 'Captured by Marouba Teach mode.'}\n",
+    }
+
+
+def action_to_route(action: dict[str, Any]) -> dict[str, Any] | None:
+    action_type = str(action.get("type") or action.get("action") or "").strip()
+    if action_type in {"ui_click", "uia"}:
+        return {
+            "type": "uia",
+            "app_window": action.get("window_title") or action.get("app_window"),
+            "element": action.get("element") or action.get("name"),
+            "role": action.get("role") or action.get("control_type"),
+        }
+    if action_type in {"shortcut", "hotkey"}:
+        return {"type": "shortcut", "keys": action.get("keys") or action.get("sequence") or action.get("hotkey")}
+    if action_type in {"text", "keyboard"}:
+        return {"type": "keyboard", "text": action.get("text") or "", "interval": action.get("interval", 0.04)}
+    if action_type in {"mouse_click", "visual"}:
+        coordinates = action.get("coordinates") or {"x": action.get("x", 0), "y": action.get("y", 0)}
+        return {"type": "visual", "coordinates": coordinates, "button": action.get("button", "left")}
+    if action_type in {"http_request", "api"}:
+        return {
+            "type": "api",
+            "endpoint": action.get("endpoint"),
+            "method": action.get("method", "GET"),
+            "payload_template": action.get("payload_template"),
+        }
+    if action_type == "cli":
+        return {"type": "cli", "command": action.get("command"), "wait_seconds": action.get("wait_seconds", 0)}
+    return None
+
+
+def fallback_order(routes: list[dict[str, Any]]) -> list[str]:
+    preferred = ["api", "cli", "uia", "shortcut", "keyboard", "visual", "gesture"]
+    seen = {route.get("type") for route in routes}
+    order = [route_type for route_type in preferred if route_type in seen]
+    return order + ["ask"]
+
+
+def workflow_summary(workflow: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": workflow.get("id"),
+        "name": workflow.get("name"),
+        "app": workflow.get("app"),
+        "description": workflow.get("description", ""),
+        "routes": len(workflow.get("routes", [])),
+        "fallback_order": workflow.get("fallback_order", []),
+    }
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value).casefold()).strip("-")
+    return slug or "workflow"
+
+
+def normalize_workflow_depth(depth: str) -> str:
+    normalized = str(depth or "summary").strip().casefold()
+    if normalized not in {"summary", "full"}:
+        raise ValueError("depth must be 'summary' or 'full'")
+    return normalized
+
+
+def workflow_read_payload(path: Path, workflow: dict[str, Any], depth: str, source_text: str) -> dict[str, Any]:
+    workflow_id = str(workflow.get("id") or path.stem)
+    frontmatter = raw_frontmatter(source_text)
+    intent = workflow_intent(workflow, source_text)
+    if depth == "summary":
+        content = f"---\n{frontmatter.strip()}\n---\n\nintent: {intent}\n"
+        return {
+            "id": workflow_id,
+            "depth": "summary",
+            "content": compact_words(content, 360),
+            "chunks": [],
+            "omitted": ["steps", "raw gesture event streams"],
+        }
+
+    content = sanitized_workflow_markdown(workflow, frontmatter, intent)
+    chunks = chunk_text(content, 2000)
+    return {
+        "id": workflow_id,
+        "depth": "full",
+        "content": "",
+        "chunks": [{"index": index + 1, "text": chunk} for index, chunk in enumerate(chunks)],
+        "omitted": ["raw gesture event streams", "raw coordinate streams"],
+    }
+
+
+def workflow_source_text(path: Path) -> str:
+    content = path.read_text(encoding="utf-8")
+    sidecar = path.with_name(f"{path.stem}.steps.md")
+    if sidecar.exists():
+        content = f"{content.rstrip()}\n\n{sidecar.read_text(encoding='utf-8')}"
+    return content
+
+
+def raw_frontmatter(content: str) -> str:
+    parts = content.split("---", 2)
+    if len(parts) >= 3 and not parts[0].strip():
+        return parts[1]
+    return ""
+
+
+def workflow_intent(workflow: dict[str, Any], source_text: str) -> str:
+    description = str(workflow.get("description") or "").strip()
+    if description:
+        return description
+    for line in source_text.splitlines():
+        text = line.strip().lstrip("#").strip()
+        if text and text != "---" and not text.startswith(("vault_spec_version:", "id:")):
+            return text
+    return "Replay recorded workflow."
+
+
+def sanitized_workflow_markdown(workflow: dict[str, Any], frontmatter: str, intent: str) -> str:
+    lines = [
+        "---",
+        frontmatter.strip(),
+        "---",
+        "",
+        f"# {workflow.get('name') or workflow.get('id') or 'Workflow'}",
+        "",
+        f"Intent: {intent}",
+        "",
+        "## Steps",
+    ]
+    steps = workflow.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        lines.append("No structured steps declared.")
+        return "\n".join(lines) + "\n"
+
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            continue
+        step_id = step.get("id") or f"step_{index:03d}"
+        lines.extend(
+            [
+                "",
+                f"### Step {index:03d} - {step_id}",
+                f"type: {step.get('type') or 'unknown'}",
+                f"intent: {step.get('intent') or ''}",
+            ]
+        )
+        routes = step.get("routes") or []
+        if isinstance(routes, list):
+            lines.append("routes:")
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                sanitized = sanitize_route(route)
+                lines.append(f"  - {json.dumps(sanitized, separators=(',', ':'), sort_keys=True)}")
+    return "\n".join(lines) + "\n"
+
+
+def sanitize_route(route: dict[str, Any]) -> dict[str, Any]:
+    sanitized = {}
+    for key, value in route.items():
+        if key in {"events", "x", "y", "normalized_x", "normalized_y", "coordinates", "window_rect"}:
+            continue
+        sanitized[key] = value
+    if "events" in route:
+        events = route.get("events")
+        count = len(events) if isinstance(events, list) else 0
+        sanitized["events_omitted"] = f"{count} raw gesture events"
+    return sanitized
+
+
+def compact_words(text: str, max_words: int) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]) + " ..."
+
+
+def chunk_text(text: str, chunk_size: int) -> list[str]:
+    return [
+        "\n".join(textwrap.wrap(chunk, width=120, replace_whitespace=False))
+        for chunk in (text[index : index + chunk_size] for index in range(0, len(text), chunk_size))
+        if chunk
+    ]
 
 
 def replay_workflow(

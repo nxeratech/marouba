@@ -47,6 +47,72 @@ pub(crate) fn list_saved_workflows() -> (Value, u16) {
     (json!(workflows), 200)
 }
 
+pub(crate) fn read_saved_workflow(name: &str, depth: &str) -> (Value, u16) {
+    let depth = depth.trim().to_ascii_lowercase();
+    if depth != "summary" && depth != "full" {
+        return (
+            json!({"status": "failed", "error": "depth must be 'summary' or 'full'"}),
+            400,
+        );
+    }
+    let Some(path) = find_workflow_path(name) else {
+        return (
+            json!({"status": "failed", "error": "workflow not found"}),
+            404,
+        );
+    };
+    let Some(content) = workflow_content_from_path(&path) else {
+        return (
+            json!({"status": "failed", "error": "failed to read workflow"}),
+            500,
+        );
+    };
+    let frontmatter = frontmatter_block(&content).unwrap_or("");
+    let workflow_id = yaml_scalar_field(frontmatter, "id").unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workflow")
+            .to_string()
+    });
+    let intent = workflow_intent_from_content(&content, frontmatter);
+
+    if depth == "summary" {
+        let mut summary = String::new();
+        summary.push_str("---\n");
+        summary.push_str(frontmatter.trim());
+        summary.push_str("\n---\n\nintent: ");
+        summary.push_str(&intent);
+        summary.push('\n');
+        return (
+            json!({
+                "id": workflow_id,
+                "depth": "summary",
+                "content": limit_words(&summary, 360),
+                "chunks": [],
+                "omitted": ["steps", "raw gesture event streams"]
+            }),
+            200,
+        );
+    }
+
+    let full = sanitized_workflow_full_text(&content, frontmatter, &workflow_id, &intent);
+    let chunks: Vec<Value> = chunk_text(&full, 2000)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| json!({"index": index + 1, "text": text}))
+        .collect();
+    (
+        json!({
+            "id": workflow_id,
+            "depth": "full",
+            "content": "",
+            "chunks": chunks,
+            "omitted": ["raw gesture event streams", "raw coordinate streams"]
+        }),
+        200,
+    )
+}
+
 pub(crate) fn workflow_summary_from_path(path: PathBuf) -> Option<VaultWorkflowSummary> {
     let metadata = std::fs::metadata(&path).ok()?;
     let name = path
@@ -63,6 +129,48 @@ pub(crate) fn workflow_summary_from_path(path: PathBuf) -> Option<VaultWorkflowS
             .map(|modified| format_modified_time(&path, modified))
             .unwrap_or_else(|| "unknown".to_string()),
     })
+}
+
+fn find_workflow_path(target: &str) -> Option<PathBuf> {
+    let target = target.trim().to_lowercase();
+    if target.is_empty() {
+        return None;
+    }
+    let entries = std::fs::read_dir(vault_workflows_dir()).ok()?;
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("md")
+            && !is_steps_sidecar(&path)
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    for path in paths {
+        let content = std::fs::read_to_string(&path).ok()?;
+        let frontmatter = frontmatter_block(&content).unwrap_or("");
+        let candidates = [
+            yaml_scalar_field(frontmatter, "id").unwrap_or_default(),
+            yaml_scalar_field(frontmatter, "name").unwrap_or_default(),
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_string(),
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_string(),
+        ];
+        if candidates
+            .iter()
+            .any(|candidate| candidate.to_lowercase() == target)
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 pub(crate) fn parse_gesture_workflow(name: &str) -> Option<Vec<RecordedEvent>> {
@@ -208,13 +316,134 @@ fn parse_step_value(block: &str) -> Result<Value, String> {
 }
 fn workflow_content(name: &str) -> Option<String> {
     let path = vault_workflows_dir().join(format!("{name}.md"));
+    workflow_content_from_path(&path)
+}
+
+fn workflow_content_from_path(path: &PathBuf) -> Option<String> {
     let mut content = std::fs::read_to_string(&path).ok()?;
-    let sidecar = steps_sidecar_path(&path);
+    let sidecar = steps_sidecar_path(path);
     if let Ok(steps) = std::fs::read_to_string(sidecar) {
         content.push_str("\n\n");
         content.push_str(&steps);
     }
     Some(content)
+}
+
+fn workflow_intent_from_content(content: &str, frontmatter: &str) -> String {
+    if let Some(description) = yaml_scalar_field(frontmatter, "description") {
+        if !description.trim().is_empty() {
+            return description.trim().to_string();
+        }
+    }
+    content
+        .lines()
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| {
+            !line.is_empty()
+                && *line != "---"
+                && !line.starts_with("vault_spec_version:")
+                && !line.starts_with("id:")
+        })
+        .unwrap_or("Replay recorded workflow.")
+        .to_string()
+}
+
+fn sanitized_workflow_full_text(
+    content: &str,
+    frontmatter: &str,
+    workflow_id: &str,
+    intent: &str,
+) -> String {
+    let title = yaml_scalar_field(frontmatter, "name").unwrap_or_else(|| workflow_id.to_string());
+    let mut lines = vec![
+        "---".to_string(),
+        frontmatter.trim().to_string(),
+        "---".to_string(),
+        String::new(),
+        format!("# {title}"),
+        String::new(),
+        format!("Intent: {intent}"),
+        String::new(),
+        "## Steps".to_string(),
+    ];
+
+    match parse_workflow_steps_from_content(content) {
+        Ok(steps) if !steps.is_empty() => {
+            for (index, step) in steps.iter().enumerate() {
+                lines.push(String::new());
+                lines.push(format!("### Step {:03} - {}", index + 1, step.id));
+                lines.push(format!("type: {}", step.step_type));
+                lines.push(format!("intent: {}", step.intent));
+                if let Some(routes) = step.value.get("routes").and_then(Value::as_array) {
+                    lines.push("routes:".to_string());
+                    for route in routes {
+                        let summary = sanitize_workflow_value(route);
+                        let text =
+                            serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
+                        lines.push(format!("  - {text}"));
+                    }
+                }
+            }
+        }
+        _ => lines.push("No structured steps declared.".to_string()),
+    }
+
+    lines.join("\n") + "\n"
+}
+
+fn sanitize_workflow_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sanitized = serde_json::Map::new();
+            for (key, item) in map {
+                if matches!(
+                    key.as_str(),
+                    "x" | "y" | "normalized_x" | "normalized_y" | "coordinates" | "window_rect"
+                ) {
+                    continue;
+                }
+                if key == "events" {
+                    sanitized.insert(
+                        "events_omitted".to_string(),
+                        json!(format!(
+                            "{} raw gesture events",
+                            item.as_array().map(|events| events.len()).unwrap_or(0)
+                        )),
+                    );
+                    continue;
+                }
+                sanitized.insert(key.clone(), sanitize_workflow_value(item));
+            }
+            Value::Object(sanitized)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_workflow_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn limit_words(text: &str, max_words: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= max_words {
+        return text.to_string();
+    }
+    words[..max_words].join(" ") + " ..."
+}
+
+fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + chunk_size).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(text[start..end].to_string());
+        start = end;
+    }
+    chunks
 }
 
 fn frontmatter_block(content: &str) -> Option<&str> {
@@ -587,5 +816,90 @@ mod tests {
         let content = "---\nid: legacy\n---\n";
         let steps = parse_workflow_steps_from_content(content).expect("legacy version accepted");
         assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn read_saved_workflow_depth_gate_hides_raw_coordinates() {
+        let root = std::env::temp_dir().join(format!(
+            "marouba-vault-read-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let vault = root.join("vault");
+        let workflows = vault.join("workflows");
+        std::fs::create_dir_all(&workflows).expect("workflow dir");
+        let workflow_path = workflows.join("depth-test.md");
+        std::fs::write(
+            &workflow_path,
+            r#"---
+vault_spec_version: 3
+id: depth-test
+name: Depth Test
+app: TestApp
+description: Test depth gated reads.
+params: []
+tags: [test]
+author: nxeratech
+created: 2026-06-14
+routes: []
+fallback_order: [api, gesture, ask]
+verification: {"type":"none"}
+---
+
+# Depth Test
+
+## Steps
+
+```yaml
+id: step_001
+type: click
+intent: Click the test button.
+routes:
+  - type: gesture
+    events:
+      - kind: mousedown
+        x: 10
+        y: 20
+        normalized_x: 0.1
+        normalized_y: 0.2
+```
+"#,
+        )
+        .expect("workflow");
+        std::env::set_var("MAROUBA_VAULT_PATH", &vault);
+
+        let (summary, status) = read_saved_workflow("depth-test", "summary");
+        assert_eq!(status, 200);
+        assert_eq!(
+            summary.get("depth").and_then(Value::as_str),
+            Some("summary")
+        );
+        assert!(
+            summary
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap()
+                .split_whitespace()
+                .count()
+                <= 400
+        );
+
+        let (full, status) = read_saved_workflow("Depth Test", "full");
+        assert_eq!(status, 200);
+        let text = full
+            .get("chunks")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|chunk| chunk.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(r#"{"events_omitted":"1 raw gesture events","type":"gesture"}"#));
+        assert!(!text.contains("normalized_x"));
+        assert!(!text.contains("\"x\":10"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

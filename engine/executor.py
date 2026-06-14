@@ -23,6 +23,7 @@ class Executor:
         start = time.perf_counter()
         source = workflow.get("source", "self_taught")
         try:
+            route = self._substitute(route, params)
             if source == "marketplace" and route.get("type") in {"shortcut", "visual", "keyboard"}:
                 workflow_id = workflow.get("id", "unknown")
                 print(

@@ -2279,7 +2279,8 @@ fn start_http_api(
         }
         let method = request.method().clone();
         let url = request.url().to_string();
-        let response = match (method, url.as_str()) {
+        let route_path = url.split('?').next().unwrap_or(&url).to_string();
+        let response = match (method, route_path.as_str()) {
             (Method::Get, "/health") => json_response(
                 json!({
                     "status": "ok",
@@ -2363,6 +2364,14 @@ fn start_http_api(
             (Method::Get, "/window") => json_response(json!(active_window()), 200),
             (Method::Get, "/workflows") => {
                 let (body, status) = list_saved_workflows();
+                json_response(body, status)
+            }
+            (Method::Get, "/workflow/read") => {
+                let name = query_param(&url, "name")
+                    .or_else(|| query_param(&url, "id"))
+                    .unwrap_or_default();
+                let depth = query_param(&url, "depth").unwrap_or_else(|| "summary".to_string());
+                let (body, status) = read_saved_workflow(&name, &depth);
                 json_response(body, status)
             }
             (Method::Get, "/recording") => json_response(json!(status_from_state(&state)), 200),
@@ -3704,6 +3713,50 @@ fn read_json<T: for<'de> Deserialize<'de>>(request: &mut tiny_http::Request) -> 
     serde_json::from_str(&body).unwrap_or_else(|_| serde_json::from_value(json!({})).unwrap())
 }
 
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (candidate, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if percent_decode(candidate) == key {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = hex_value(bytes[index + 1]);
+            let low = hex_value(bytes[index + 2]);
+            if let (Some(high), Some(low)) = (high, low) {
+                output.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn json_response(value: Value, status: u16) -> Response<std::io::Cursor<Vec<u8>>> {
     cors_response(value, status)
 }
@@ -4807,12 +4860,7 @@ fn write_replay_run_log(workflow: &str, status: &str, routes: &[Value]) {
 
 fn write_replay_run_log_to_path(path: &Path, workflow: &str, status: &str, routes: &[Value]) {
     let timestamp = current_unix_ms();
-    let body = json!({
-        "workflow": workflow,
-        "status": status,
-        "timestamp_ms": timestamp,
-        "routes": routes
-    });
+    let body = compact_replay_run_log(workflow, status, timestamp, routes);
     match serde_json::to_string_pretty(&body) {
         Ok(text) => {
             if let Err(error) = std::fs::write(&path, text) {
@@ -4821,6 +4869,96 @@ fn write_replay_run_log_to_path(path: &Path, workflow: &str, status: &str, route
         }
         Err(error) => write_debug_log(&format!("failed to encode replay run log: {error}")),
     }
+}
+
+fn compact_replay_run_log(
+    workflow: &str,
+    status: &str,
+    timestamp_ms: u128,
+    routes: &[Value],
+) -> Value {
+    let source_steps = parse_v2_workflow_steps(workflow)
+        .map(|steps| steps.len())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| routes.len());
+    let repair_count = routes
+        .iter()
+        .filter(|route| route.get("route").and_then(Value::as_str) == Some("repair"))
+        .count();
+    let api_failures = routes
+        .iter()
+        .filter(|route| {
+            route.get("failed_route").and_then(Value::as_str) == Some("api")
+                || route
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason.to_ascii_lowercase().contains("api"))
+        })
+        .count();
+    let success_routes = routes
+        .iter()
+        .filter(|route| {
+            let kind = route.get("route").and_then(Value::as_str).unwrap_or("");
+            kind != "repair" && kind != "abort" && !route.get("reason").is_some()
+        })
+        .count();
+    let steps_replayed = if status == "ok" {
+        source_steps
+    } else {
+        success_routes.min(source_steps)
+    };
+    let diff: Vec<Value> = routes
+        .iter()
+        .filter(|route| {
+            route.get("route").and_then(Value::as_str) == Some("repair")
+                || route.get("route").and_then(Value::as_str) == Some("abort")
+                || route.get("reason").is_some()
+                || route.get("fallback_reason").is_some()
+        })
+        .map(compact_route_diff)
+        .collect();
+    let outcome = if status == "ok" {
+        format!(
+            "ok: {}/{} steps replayed, r4={}, api_failures={}",
+            steps_replayed, source_steps, repair_count, api_failures
+        )
+    } else {
+        format!("{status}: {steps_replayed}/{source_steps} steps replayed, r4={repair_count}, api_failures={api_failures}")
+    };
+
+    json!({
+        "workflow": workflow,
+        "status": status,
+        "timestamp_ms": timestamp_ms,
+        "outcome": outcome,
+        "source": {"workflow": workflow, "steps": source_steps},
+        "summary": {
+            "routes_recorded": routes.len(),
+            "steps_replayed": steps_replayed,
+            "step_success_percent": if source_steps == 0 {
+                0.0
+            } else {
+                ((steps_replayed as f64 / source_steps as f64) * 1000.0).round() / 10.0
+            },
+            "r4_count": repair_count,
+            "api_failures": api_failures
+        },
+        "diff": diff
+    })
+}
+
+fn compact_route_diff(route: &Value) -> Value {
+    json!({
+        "step": route.get("step").cloned().unwrap_or(Value::Null),
+        "route": route.get("route").cloned().unwrap_or(Value::Null),
+        "failed_route": route.get("failed_route").cloned().unwrap_or(Value::Null),
+        "reason": route
+            .get("reason")
+            .or_else(|| route.get("fallback_reason"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "policy": route.get("policy").cloned().unwrap_or(Value::Null)
+    })
 }
 
 fn is_fill_canvas_click(event: &RecordedEvent) -> bool {
@@ -8751,6 +8889,28 @@ mod tests {
         let guard = state.lock().unwrap();
         assert_eq!(guard.events.len(), 1);
         assert_eq!(guard.events[0].api_param.as_deref(), Some("load_sample"));
+    }
+
+    #[test]
+    fn compact_run_log_for_twelve_steps_stays_small() {
+        let routes: Vec<Value> = (1..=12)
+            .map(|index| json!({"step": format!("step_{index:03}"), "route": "api", "output": {"ok": true}}))
+            .collect();
+        let body = compact_replay_run_log("unit-soak", "ok", 123, &routes);
+        let text = serde_json::to_string_pretty(&body).expect("json");
+
+        assert!(text.lines().count() <= 30, "{text}");
+        assert_eq!(
+            body.get("summary")
+                .and_then(|summary| summary.get("step_success_percent"))
+                .and_then(Value::as_f64),
+            Some(100.0)
+        );
+        assert_eq!(
+            body.get("diff").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        assert!(!text.contains("\"output\""));
     }
 
     #[test]
