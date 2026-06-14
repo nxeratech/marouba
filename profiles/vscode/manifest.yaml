@@ -1,0 +1,16 @@
+adapter: vscode
+mechanism: local-extension-log
+tier: T1
+versions: ["1.x"]
+capabilities:
+  text_edits: full
+  commands: full
+  terminal_usage: full
+  file_end_state: full
+  uia_fallback: strong
+  telemetry: forbidden
+  network: forbidden
+known_blockers:
+  - Extension must not use telemetry, fetch, HTTP, sockets, or remote services.
+  - Replay verifies file end-state by workspace hash/diff, not by UI pixels.
+setup: Install the Marouba VS Code extension locally in the workspace; extension logs local text document edits, commands, and terminal usage to the vault.
