@@ -7529,6 +7529,9 @@ struct WorkflowMetadata {
 }
 
 fn describe_with_claude(name: &str, events: &[RecordedEvent]) -> WorkflowMetadata {
+    if !legacy_capture_ai_summary_enabled() {
+        return fallback_metadata(name, events);
+    }
     if std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -7537,6 +7540,18 @@ fn describe_with_claude(name: &str, events: &[RecordedEvent]) -> WorkflowMetadat
         return fallback_metadata(name, events);
     }
     call_claude_summary(name, events).unwrap_or_else(|| fallback_metadata(name, events))
+}
+
+fn legacy_capture_ai_summary_enabled() -> bool {
+    std::env::var("MAROUBA_LEGACY_CAPTURE_AI_SUMMARY")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn call_claude_summary(name: &str, events: &[RecordedEvent]) -> Option<WorkflowMetadata> {

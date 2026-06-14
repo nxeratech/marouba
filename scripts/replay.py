@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine.distillation import distill_after_session
 from engine.executor import Executor
 from engine.repairer import Repairer
 from engine.router import Router
@@ -65,6 +66,7 @@ def replay_workflow(
                 print(f"[Marouba] Complete. Output: {output}")
                 log_path = vault.log_run(workflow, result)
                 print(f"[Marouba] Run logged to {log_path.relative_to(root)}")
+                maybe_distill_after_session(vault, workflow)
                 print("[Marouba] Replay complete.")
                 return 0
         else:
@@ -91,6 +93,7 @@ def replay_workflow(
                 }
                 log_path = vault.log_run(workflow, pause_result)
                 print(f"[Marouba] Replay paused after 3 consecutive repairs. Run logged to {log_path.relative_to(root)}")
+                maybe_distill_after_session(vault, workflow)
                 return 1
 
     print("[Marouba] All routes failed.")
@@ -104,6 +107,7 @@ def replay_workflow(
     if repair_result["success"]:
         log_path = vault.log_run(workflow, repair_result)
         print(f"[Marouba] Repair recorded. Run logged to {log_path.relative_to(root)}")
+        maybe_distill_after_session(vault, workflow)
         print("[Marouba] Phase 1b repair complete.")
         return 0
     return 1
@@ -169,13 +173,26 @@ def replay_sequence(workflow: dict, params: dict, root: Path, vault: Vault, exec
         if not result["success"]:
             print(f"[Marouba] Step failed: {route_type}: {result['error']}", file=sys.stderr)
             vault.log_run(workflow, {"success": False, "route_type": "sequence", "steps": results})
+            maybe_distill_after_session(vault, workflow)
             return 1
 
     final_result = {"success": True, "route_type": "sequence", "steps": results}
     log_path = vault.log_run(workflow, final_result)
     print(f"[Marouba] Run logged to {log_path.relative_to(root)}")
+    maybe_distill_after_session(vault, workflow)
     print("[Marouba] Replay complete.")
     return 0
+
+
+def maybe_distill_after_session(vault: Vault, workflow: dict) -> dict:
+    try:
+        result = distill_after_session(vault, workflow)
+    except Exception as exc:
+        print(f"[Marouba] AI distillation skipped: {exc}", file=sys.stderr)
+        return {"status": "error", "error": str(exc)}
+    if result.get("status") == "annotated":
+        print(f"[Marouba] AI distillation annotations written to {result['path']}")
+    return result
 
 
 def main() -> int:
