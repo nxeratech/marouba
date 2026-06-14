@@ -1,0 +1,15 @@
+adapter: autocad
+mechanism: com + dotnet-command-events + autolisp
+tier: T1
+versions: ["2024", "2025", "2026", "latest"]
+capabilities:
+  command_stream: full
+  coordinates: full_when_command_params_captured
+  entity_verification: full
+  replay_com: full
+  replay_autolisp: full
+known_blockers:
+  - Commands captured without parameters are refused.
+  - UI-only captures cannot be promoted to command-level r1.
+  - Third-party commands with hidden/non-echoed parameters are declared gaps until instrumented.
+setup: AutoCAD installed locally with Marouba .NET command-stream capture bridge and COM/AutoLISP replay enabled.

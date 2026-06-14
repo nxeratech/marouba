@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from engine.companion_client import CompanionClient
 from engine.aftereffects_adapter import AfterEffectsAdapter
+from engine.autocad_adapter import AutoCADAdapter
 from engine.blender_adapter import BlenderAdapter
 from engine.comfyui_adapter import ComfyUIAdapter
 from engine.obs_adapter import ObsAdapter
@@ -72,6 +73,9 @@ class Executor:
             return self._result(False, error=str(exc), started=start, route=route, source=source)
 
     def _execute_adapter(self, route: dict[str, Any], params: dict[str, Any], workflow: dict[str, Any]) -> str | None:
+        if str(route.get("adapter") or "").casefold() in {"autocad", "auto-cad"}:
+            result = AutoCADAdapter().execute(route, params, workflow)
+            return params.get("output_path") or json.dumps(result, sort_keys=True)
         if str(route.get("adapter") or "").casefold() in {"after-effects", "aftereffects", "ae"}:
             result = AfterEffectsAdapter().execute(route, params, workflow)
             return params.get("output_path") or json.dumps(result, sort_keys=True)
