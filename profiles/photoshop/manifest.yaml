@@ -1,13 +1,17 @@
 adapter: photoshop
-mechanism: jsx + uxp + uia
-tier: T2
+mechanism: uxp-actionjson + extendscript-listeners + gesture-strokes
+tier: T1
 versions: ["2024", "2025", "latest"]
 capabilities:
+  tool_changes: full
   layer_ops: full
   export_params: full
-  filter_params: partial
-  brush_strokes: gesture
+  filter_params: full_when_action_descriptor_exposes_numeric_values
+  adjustment_params: full_when_action_descriptor_exposes_numeric_values
+  brush_strokes: r3_gesture_declared
   dialog_controls: uia
 known_blockers:
-  - Some plugin dialogs expose no scriptable parameter values.
-setup: Photoshop installed locally; scripting route preferred when available
+  - Brush strokes remain r3 gesture by design because timing/pressure/movement are taste signals.
+  - Capture must fail if a Photoshop filter or adjustment dialog value is not captured numerically.
+  - Third-party plugin dialogs with no action descriptor parameter exposure are declared gaps, not r1 captures.
+setup: Photoshop installed locally; UXP developer mode action notifications or ExtendScript listener capture enabled.

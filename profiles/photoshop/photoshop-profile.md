@@ -2,8 +2,12 @@
 app: Photoshop
 app_version: latest
 platform: windows
-api_base: null
-endpoints: {}
+api_base: Photoshop UXP action module / ExtendScript Action Manager
+endpoints:
+  uxp_batch_play: require('photoshop').action.batchPlay
+  uxp_event_listener: require('photoshop').action.addNotificationListener
+  uxp_modal: require('photoshop').core.executeAsModal
+  extendscript_execute_action: executeAction
 uia_window_title: Adobe Photoshop
 uia_elements:
   file_menu: File
@@ -26,4 +30,4 @@ output_folder: C:\Users\Dave\Pictures\Marouba\Photoshop
 
 # Photoshop Profile
 
-Photoshop automation is usually fastest through JSX scripts. UIA and shortcuts cover export dialogs when scripting is unavailable.
+Photoshop semantic capture prefers UXP action notifications and actionJSON descriptors. Layer operations, tool changes, filters, and adjustments are r1 only when the descriptor contains exact values; brush strokes stay r3 gesture evidence because timing and movement are part of the taste signal.
