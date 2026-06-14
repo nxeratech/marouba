@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -79,6 +80,27 @@ def test_mcp_list_workflows_reads_vault_frontmatter(tmp_path: Path, monkeypatch)
             "path": str(tmp_path / "vault" / "workflows" / "mcp-test-workflow.md"),
         }
     ]
+
+
+def test_mcp_logs_token_counts_per_call(tmp_path: Path, monkeypatch) -> None:
+    vault = Vault(tmp_path)
+    vault.save_workflow(workflow_dict())
+    log_path = tmp_path / "mcp-token-log.jsonl"
+    monkeypatch.setenv("MAROUBA_VAULT_PATH", str(tmp_path / "vault"))
+    monkeypatch.setenv("MAROUBA_MCP_TOKEN_LOG", str(log_path))
+    monkeypatch.setenv("MAROUBA_MCP_SESSION", "unit-token-test")
+
+    tools = load_mcp_tools()
+    tools.search_workflows("mcp test", limit=1)
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["tool"] == "search_workflows"
+    assert rows[0]["session"] == "unit-token-test"
+    assert rows[0]["input_tokens"] > 0
+    assert rows[0]["output_tokens"] > 0
+    assert rows[0]["total_tokens"] == rows[0]["input_tokens"] + rows[0]["output_tokens"]
+    assert rows[0]["estimator"] == "regex_json_v1"
 
 
 def test_mcp_read_workflow_summary_is_depth_gated(tmp_path: Path, monkeypatch) -> None:

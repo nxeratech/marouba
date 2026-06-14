@@ -8,9 +8,10 @@ import re
 import shutil
 import sys
 import textwrap
-from datetime import date
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,6 +22,9 @@ from engine.router import Router
 from engine.vault import Vault
 from marketplace.installer import InstallError, install_bundle
 from scripts.replay import replay_workflow as run_replay_workflow
+
+T = TypeVar("T")
+MCP_TOKEN_LOG_VERSION = 1
 
 
 def configured_vault_path() -> Path:
@@ -43,15 +47,171 @@ def vault() -> Vault:
     return instance
 
 
+def token_log_path() -> Path:
+    configured = os.environ.get("MAROUBA_MCP_TOKEN_LOG")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+    else:
+        path = configured_vault_path() / "runs" / "mcp_token_usage.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def instrument_mcp_call(tool: str, args: dict[str, Any], call: Callable[[], T]) -> T:
+    started = time.perf_counter()
+    status = "ok"
+    result: Any = None
+    error: str | None = None
+    try:
+        result = call()
+        return result
+    except Exception as exc:
+        status = "error"
+        error = str(exc)
+        raise
+    finally:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        log_mcp_token_usage(tool, args, result, status=status, error=error, elapsed_ms=elapsed_ms)
+
+
+def log_mcp_token_usage(
+    tool: str,
+    args: dict[str, Any],
+    result: Any,
+    status: str,
+    error: str | None,
+    elapsed_ms: int,
+) -> None:
+    request_text = stable_json({"tool": tool, "arguments": args})
+    response_text = stable_json({"result": result if error is None else {"error": error}})
+    input_tokens = estimate_tokens(request_text)
+    output_tokens = estimate_tokens(response_text)
+    record = {
+        "version": MCP_TOKEN_LOG_VERSION,
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+        "session": os.environ.get("MAROUBA_MCP_SESSION", "default"),
+        "tool": tool,
+        "status": status,
+        "elapsed_ms": elapsed_ms,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "estimator": "regex_json_v1",
+    }
+    if error:
+        record["error"] = error
+    try:
+        with token_log_path().open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def estimate_tokens(value: Any) -> int:
+    text = value if isinstance(value, str) else stable_json(value)
+    return len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
+
+
 def list_workflows() -> list[dict[str, Any]]:
     """List workflows in the configured Marouba vault."""
 
-    return vault().list_vaults()
+    return instrument_mcp_call("list_workflows", {}, lambda: vault().list_vaults())
 
 
 def search_workflows(query: str = "", app: str | None = None, tags: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
     """Search workflows by id, name, app, description, and tags."""
 
+    return instrument_mcp_call(
+        "search_workflows",
+        {"query": query, "app": app, "tags": tags, "limit": limit},
+        lambda: search_workflows_impl(query=query, app=app, tags=tags, limit=limit),
+    )
+
+
+def teach_workflow(
+    name: str,
+    app: str,
+    actions: list[dict[str, Any]],
+    description: str = "",
+) -> dict[str, Any]:
+    """Create and save a taught sequence workflow from captured action dictionaries."""
+
+    return instrument_mcp_call(
+        "teach_workflow",
+        {"name": name, "app": app, "actions": actions, "description": description},
+        lambda: teach_workflow_impl(name=name, app=app, actions=actions, description=description),
+    )
+
+
+def compose_workflow(
+    name: str,
+    app: str,
+    intent: str,
+    routes: list[dict[str, Any]] | None = None,
+    params: list[dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+    confirm_save: bool = False,
+) -> dict[str, Any]:
+    """Compose a workflow preview; save only when confirm_save is true."""
+
+    return instrument_mcp_call(
+        "compose_workflow",
+        {
+            "name": name,
+            "app": app,
+            "intent": intent,
+            "routes": routes,
+            "params": params,
+            "tags": tags,
+            "confirm_save": confirm_save,
+        },
+        lambda: compose_workflow_impl(
+            name=name,
+            app=app,
+            intent=intent,
+            routes=routes,
+            params=params,
+            tags=tags,
+            confirm_save=confirm_save,
+        ),
+    )
+
+
+def install_workflow(bundle: str) -> dict[str, Any]:
+    """Install a signed .mwf workflow bundle after Ed25519 verification."""
+
+    return instrument_mcp_call("install_workflow", {"bundle": bundle}, lambda: install_workflow_impl(bundle))
+
+
+def read_workflow(workflow_id: str, depth: str = "summary") -> dict[str, Any]:
+    """Return a depth-gated workflow view by id, name, or file stem."""
+
+    return instrument_mcp_call(
+        "read_workflow",
+        {"workflow_id": workflow_id, "depth": depth},
+        lambda: read_workflow_impl(workflow_id, depth),
+    )
+
+
+def replay_workflow(
+    workflow_id: str,
+    params: dict[str, Any] | None = None,
+    no_repair: bool = True,
+) -> dict[str, Any]:
+    """Replay a workflow through Marouba's existing router and executor."""
+
+    return instrument_mcp_call(
+        "replay_workflow",
+        {"workflow_id": workflow_id, "params": params or {}, "no_repair": no_repair},
+        lambda: replay_workflow_impl(workflow_id, params=params, no_repair=no_repair),
+    )
+
+
+def search_workflows_impl(query: str = "", app: str | None = None, tags: list[str] | None = None, limit: int = 10) -> list[dict[str, Any]]:
     query_terms = [term.casefold() for term in str(query or "").split() if term.strip()]
     wanted_tags = {tag.casefold() for tag in (tags or []) if str(tag).strip()}
     app_term = str(app or "").casefold().strip()
@@ -79,20 +239,18 @@ def search_workflows(query: str = "", app: str | None = None, tags: list[str] | 
     return results[: max(1, int(limit or 10))]
 
 
-def teach_workflow(
+def teach_workflow_impl(
     name: str,
     app: str,
     actions: list[dict[str, Any]],
     description: str = "",
 ) -> dict[str, Any]:
-    """Create and save a taught sequence workflow from captured action dictionaries."""
-
     workflow = workflow_from_actions(name=name, app=app, actions=actions, description=description, tags=["taught", slugify(app)])
     path = vault().save_workflow(workflow)
     return {"status": "saved", "id": workflow["id"], "path": str(path), "workflow": workflow_summary(workflow)}
 
 
-def compose_workflow(
+def compose_workflow_impl(
     name: str,
     app: str,
     intent: str,
@@ -101,8 +259,6 @@ def compose_workflow(
     tags: list[str] | None = None,
     confirm_save: bool = False,
 ) -> dict[str, Any]:
-    """Compose a workflow preview; save only when confirm_save is true."""
-
     workflow = {
         "id": slugify(name),
         "name": name,
@@ -129,9 +285,7 @@ def compose_workflow(
     return {"status": "saved", "id": workflow["id"], "path": str(path), "workflow": workflow_summary(workflow)}
 
 
-def install_workflow(bundle: str) -> dict[str, Any]:
-    """Install a signed .mwf workflow bundle after Ed25519 verification."""
-
+def install_workflow_impl(bundle: str) -> dict[str, Any]:
     try:
         path = install_bundle(bundle, configured_root())
     except InstallError as error:
@@ -141,9 +295,7 @@ def install_workflow(bundle: str) -> dict[str, Any]:
     return {"status": "installed", "ok": True, "path": str(path)}
 
 
-def read_workflow(workflow_id: str, depth: str = "summary") -> dict[str, Any]:
-    """Return a depth-gated workflow view by id, name, or file stem."""
-
+def read_workflow_impl(workflow_id: str, depth: str = "summary") -> dict[str, Any]:
     depth = normalize_workflow_depth(depth)
     target = workflow_id.casefold()
     workflows_dir = vault().workflows_dir
@@ -160,6 +312,33 @@ def read_workflow(workflow_id: str, depth: str = "summary") -> dict[str, Any]:
         if target in candidates:
             return workflow_read_payload(path, workflow, depth, workflow_source_text(path))
     raise FileNotFoundError(f"Workflow not found: {workflow_id}")
+
+
+def replay_workflow_impl(
+    workflow_id: str,
+    params: dict[str, Any] | None = None,
+    no_repair: bool = True,
+) -> dict[str, Any]:
+    params = params or {}
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    root = configured_root()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), silence_process_stdio():
+        exit_code = run_replay_workflow(
+            workflow_id,
+            params,
+            root=root,
+            no_repair=no_repair,
+            router=Router({"cli": mcp_cli_available}),
+            executor=Executor(root),
+        )
+
+    return {
+        "success": exit_code == 0,
+        "exit_code": exit_code,
+        "stdout": stdout.getvalue(),
+        "stderr": stderr.getvalue(),
+    }
 
 
 def workflow_from_actions(
@@ -366,35 +545,6 @@ def chunk_text(text: str, chunk_size: int) -> list[str]:
         for chunk in (text[index : index + chunk_size] for index in range(0, len(text), chunk_size))
         if chunk
     ]
-
-
-def replay_workflow(
-    workflow_id: str,
-    params: dict[str, Any] | None = None,
-    no_repair: bool = True,
-) -> dict[str, Any]:
-    """Replay a workflow through Marouba's existing router and executor."""
-
-    params = params or {}
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    root = configured_root()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), silence_process_stdio():
-        exit_code = run_replay_workflow(
-            workflow_id,
-            params,
-            root=root,
-            no_repair=no_repair,
-            router=Router({"cli": mcp_cli_available}),
-            executor=Executor(root),
-        )
-
-    return {
-        "success": exit_code == 0,
-        "exit_code": exit_code,
-        "stdout": stdout.getvalue(),
-        "stderr": stderr.getvalue(),
-    }
 
 
 def mcp_cli_available(route: dict[str, Any]) -> bool:
