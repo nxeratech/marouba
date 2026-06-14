@@ -1,0 +1,15 @@
+adapter: reaper
+mechanism: reascript-api
+tier: T1
+versions: ["7.x"]
+capabilities:
+  actions: full
+  arrange_items: full
+  track_state: full
+  fx_params: full
+  envelopes: full
+  project_state: full
+known_blockers:
+  - Capture must fail if an FX parameter is touched but ReaScript cannot return an exact value.
+  - Third-party FX with hidden or non-automatable parameters require repair metadata rather than guessed values.
+setup: REAPER installed with ReaScript enabled; Lua is embedded and Python replay requires REAPER Python configured when using Python scripts.
